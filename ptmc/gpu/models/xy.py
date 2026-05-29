@@ -366,6 +366,7 @@ class XYModel(BaseModel):
     """
 
     J: float = 1.0
+    theta_step: float = math.pi / 2.0
     ordered_start: bool = False
     name: str = "xy"
     output_prefix: str = "xy2d"
@@ -390,6 +391,7 @@ class XYModel(BaseModel):
             "model_name": self.name,
             "output_prefix": self.output_prefix,
             "J": float(self.J),
+            "theta_step": float(self.theta_step),
             "ordered_start": bool(self.ordered_start),
             "hamiltonian": "H = -J sum_<ij> cos(theta_i - theta_j)",
             "update_scheme": "two-color checkerboard Metropolis angle proposals",
@@ -407,7 +409,6 @@ class XYModel(BaseModel):
         L: int,
         R: int,
         rng: np.random.Generator,
-        field_step: float,
         threads_per_block: int,
         full_site_blocks: int,
         update_blocks_per_walker: int,
@@ -420,7 +421,7 @@ class XYModel(BaseModel):
             L=L,
             R=R,
             rng=rng,
-            theta_step=field_step,
+            theta_step=self.theta_step,
             threads_per_block=threads_per_block,
             full_site_blocks=full_site_blocks,
             update_blocks_per_walker=update_blocks_per_walker,
@@ -472,7 +473,7 @@ class XYRuntime(BaseRuntime):
         self.J = self.model.kernel_J()
         self.theta_step = np.float32(theta_step)
         if not np.isfinite(self.theta_step) or self.theta_step <= 0.0:
-            raise ValueError("field_step/theta_step must be finite and positive.")
+            raise ValueError("theta_step must be finite and positive.")
 
         if self.model.ordered_start:
             thetas_h = np.zeros((self.R, self.L, self.L), dtype=np.float32)
@@ -809,6 +810,7 @@ class XYRuntime(BaseRuntime):
             "helicity_Iy_block_means": helicity_Iy_block_means,
             "helicity_Iy2_block_means": helicity_Iy2_block_means,
             "observable_block_size": self.observable_block_size,
+            "derived_observable_block_size": self.helicity_observable_block_size,
             "helicity_observable_block_size": self.helicity_observable_block_size,
         }
 

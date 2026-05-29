@@ -202,7 +202,6 @@ class IsingModel(BaseModel):
         L: int,
         R: int,
         rng: np.random.Generator,
-        field_step: float,
         threads_per_block: int,
         full_site_blocks: int,
         update_blocks_per_walker: int,
@@ -210,7 +209,6 @@ class IsingModel(BaseModel):
         full_lattice_blocks_per_walker: int,
         inv_N: np.float32,
     ) -> "IsingRuntime":
-        del field_step
         del full_lattice_blocks_per_walker
         return IsingRuntime(
             model=self,
@@ -300,6 +298,7 @@ class IsingRuntime(BaseRuntime):
         self.d_order2_block_sums = None
         self.d_order4_block_sums = None
         self.observable_block_size = np.int32(0)
+        self.derived_observable_block_size = np.int32(0)
         self.energy_drift_last = np.zeros(self.R, dtype=np.float32)
         self.energy_drift_max = np.zeros(self.R, dtype=np.float32)
         self.energy_recompute_checks = np.zeros(self.R, dtype=np.int64)
@@ -393,12 +392,14 @@ class IsingRuntime(BaseRuntime):
         store_primary_histories: bool,
         observable_n_blocks: int,
     ) -> None:
-        del n_derived_meas
         n_meas = int(n_meas)
+        n_derived_meas = int(n_derived_meas)
         if store_primary_histories:
-            hist_shape = (self.R, n_meas)
-            self.d_energies = cuda.device_array(hist_shape, dtype=np.float32)
-            self.d_order_parameter = cuda.device_array(hist_shape, dtype=np.float32)
+            self.d_energies = cuda.device_array((self.R, n_meas), dtype=np.float32)
+            self.d_order_parameter = cuda.device_array(
+                (self.R, n_derived_meas),
+                dtype=np.float32,
+            )
         else:
             self.d_energies = None
             self.d_order_parameter = None
@@ -409,28 +410,31 @@ class IsingRuntime(BaseRuntime):
             zeros = np.zeros((self.R, n_blocks), dtype=np.float32)
             self.d_energy_block_sums = cuda.to_device(zeros)
             self.d_energy2_block_sums = cuda.to_device(zeros)
+        else:
+            self.d_energy_block_sums = None
+            self.d_energy2_block_sums = None
+
+        n_order_blocks, order_block_size = block_count_and_size(
+            n_derived_meas,
+            observable_n_blocks,
+        )
+        self.derived_observable_block_size = np.int32(order_block_size)
+        if n_order_blocks > 0:
+            zeros = np.zeros((self.R, n_order_blocks), dtype=np.float32)
             self.d_order_abs_block_sums = cuda.to_device(zeros)
             self.d_order2_block_sums = cuda.to_device(zeros)
             self.d_order4_block_sums = cuda.to_device(zeros)
         else:
-            self.d_energy_block_sums = None
-            self.d_energy2_block_sums = None
             self.d_order_abs_block_sums = None
             self.d_order2_block_sums = None
             self.d_order4_block_sums = None
 
     def record_primary_observables(self, walker_of_slot, col: int) -> None:
-        if self.d_energies is not None and self.d_order_parameter is not None:
+        if self.d_energies is not None:
             record_scalar_by_slot_kernel[self.slot_blocks, self.threads_per_block](
                 self.d_E,
                 walker_of_slot,
                 self.d_energies,
-                col,
-            )
-            record_scalar_by_slot_kernel[self.slot_blocks, self.threads_per_block](
-                self.d_M,
-                walker_of_slot,
-                self.d_order_parameter,
                 col,
             )
         if self.d_energy_block_sums is not None:
@@ -445,6 +449,22 @@ class IsingRuntime(BaseRuntime):
                 col,
                 int(self.observable_block_size),
             )
+
+    def record_derived_observables(
+        self,
+        betas_by_walker,
+        walker_of_slot,
+        col: int,
+    ) -> None:
+        del betas_by_walker
+        if self.d_order_parameter is not None:
+            record_scalar_by_slot_kernel[self.slot_blocks, self.threads_per_block](
+                self.d_M,
+                walker_of_slot,
+                self.d_order_parameter,
+                col,
+            )
+        if self.d_order_abs_block_sums is not None:
             accumulate_order_block_moments_by_slot_kernel[
                 self.slot_blocks,
                 self.threads_per_block,
@@ -455,18 +475,8 @@ class IsingRuntime(BaseRuntime):
                 self.d_order2_block_sums,
                 self.d_order4_block_sums,
                 col,
-                int(self.observable_block_size),
+                int(self.derived_observable_block_size),
             )
-
-    def record_derived_observables(
-        self,
-        betas_by_walker,
-        walker_of_slot,
-        col: int,
-    ) -> None:
-        del betas_by_walker
-        del walker_of_slot
-        del col
 
     def copy_measurements_to_host(self) -> dict[str, np.ndarray]:
         energies = (
@@ -488,22 +498,26 @@ class IsingRuntime(BaseRuntime):
             energy2_block_means = (
                 self.d_energy2_block_sums.copy_to_host() * inv_block_size
             )
+        else:
+            energy_block_means = np.empty((self.R, 0), dtype=np.float32)
+            energy2_block_means = np.empty((self.R, 0), dtype=np.float32)
+
+        order_block_size = int(self.derived_observable_block_size)
+        if self.d_order_abs_block_sums is not None and order_block_size > 0:
+            inv_order_block_size = np.float32(1.0 / float(order_block_size))
             order_abs_block_means = (
-                self.d_order_abs_block_sums.copy_to_host() * inv_block_size
+                self.d_order_abs_block_sums.copy_to_host() * inv_order_block_size
             )
             order2_block_means = (
-                self.d_order2_block_sums.copy_to_host() * inv_block_size
+                self.d_order2_block_sums.copy_to_host() * inv_order_block_size
             )
             order4_block_means = (
-                self.d_order4_block_sums.copy_to_host() * inv_block_size
+                self.d_order4_block_sums.copy_to_host() * inv_order_block_size
             )
         else:
-            empty = np.empty((self.R, 0), dtype=np.float32)
-            energy_block_means = empty
-            energy2_block_means = empty
-            order_abs_block_means = empty
-            order2_block_means = empty
-            order4_block_means = empty
+            order_abs_block_means = np.empty((self.R, 0), dtype=np.float32)
+            order2_block_means = np.empty((self.R, 0), dtype=np.float32)
+            order4_block_means = np.empty((self.R, 0), dtype=np.float32)
 
         return {
             "energies": energies,
@@ -514,6 +528,7 @@ class IsingRuntime(BaseRuntime):
             "order2_block_means": order2_block_means,
             "order4_block_means": order4_block_means,
             "observable_block_size": self.observable_block_size,
+            "derived_observable_block_size": self.derived_observable_block_size,
             "local_update_attempts": (
                 self.d_local_update_attempts.copy_to_host()
             ),

@@ -31,7 +31,6 @@ class ParallelTemperingGPU:
         model: BaseModel,
         sweeps_between_swaps: int = 1,
         record_stride: int = 10,
-        field_step: float = 0.25,
         seed: int | None = None,
         rng: np.random.Generator | None = None,
         threads_per_block: int = 128,
@@ -102,7 +101,7 @@ class ParallelTemperingGPU:
         if self.R < 2:
             raise ValueError("At least two temperatures are required for PT.")
         self._setup_launch_geometry()
-        self._create_model_runtime(field_step=field_step)
+        self._create_model_runtime()
         self._allocate_pt_arrays(seed=seed)
         self._allocate_swap_stats()
         self.label_positions: np.ndarray | None = None
@@ -140,7 +139,7 @@ class ParallelTemperingGPU:
             self.max_swap_pairs + self.threads_per_block - 1
         ) // self.threads_per_block
 
-    def _create_model_runtime(self, field_step: float) -> None:
+    def _create_model_runtime(self) -> None:
         """
         Ask the model to create its live runtime.
         This is where the runner hands general simulation information to the model.
@@ -149,7 +148,6 @@ class ParallelTemperingGPU:
             L=self.L,
             R=self.R,
             rng=self.rng,
-            field_step=field_step,
             threads_per_block=self.threads_per_block,
             full_site_blocks=self.full_site_blocks,
             update_blocks_per_walker=self.update_blocks_per_walker,
@@ -399,7 +397,7 @@ class ParallelTemperingGPU:
         self,
         *,
         record_during_equil: bool = False,
-        derived_observable_stride: int = 5,
+        derived_observable_stride: int = 1,
         store_primary_histories: bool = True,
         observable_n_blocks: int = 20,
     ) -> dict[str, Any]:

@@ -1,0 +1,344 @@
+{
+  "output_dir": "outputs\\ising_gpu",
+  "plots_dir": "outputs\\ising_gpu\\plots",
+  "L_values": [
+    16,
+    32,
+    64
+  ],
+  "n_plots": 13,
+  "plots": [
+    "energy_per_site.png",
+    "specific_heat.png",
+    "z2_order_parameter.png",
+    "susceptibility.png",
+    "binder_cumulant.png",
+    "swap_acceptance_rate.png",
+    "local_acceptance_rate.png",
+    "walker_positions.png",
+    "energies_tau_int_sweeps.png",
+    "z2_order2_tau_int_sweeps.png",
+    "z2_order_abs_tau_int_sweeps.png",
+    "energy_drift_abs_max_by_walker.png",
+    "energy_drift_recompute_count.png"
+  ],
+  "analysis": {
+    "binder_crossing": {
+      "available": true,
+      "L_pair": [
+        32,
+        64
+      ],
+      "T": 2.2694278248451796,
+      "T_err": 0.0011948640058216241,
+      "value": 0.610065828243076,
+      "target": 2.3012607097625732,
+      "target_source": "largest-L finite-size peak",
+      "crossing_temperatures": [
+        2.2694278248451796
+      ],
+      "n_bootstrap": 1900
+    },
+    "runs": {
+      "16": {
+        "specific_heat_peak": {
+          "T": 2.320919990539551,
+          "value": 1.547896896178216
+        },
+        "susceptibility_peak": {
+          "T": 2.4129602909088135,
+          "value": 6.147688596812667
+        },
+        "swap_acceptance": {
+          "mean": 0.9488196969696969,
+          "min": 0.8553,
+          "max": 0.97665,
+          "accepted_total": 1878663,
+          "attempts_total": 1980000
+        },
+        "local_acceptance": {
+          "local": {
+            "mean": 0.16892327226562504,
+            "min": 0.14348845703125,
+            "max": 0.19144998046875,
+            "accepted_total": 864887154,
+            "attempted_total": 5120000000
+          }
+        },
+        "round_trips": {
+          "total": 642,
+          "walkers_with_round_trips": 100,
+          "max_per_walker": 11
+        },
+        "commutes": {
+          "total": 689,
+          "walkers_with_commutes": 100,
+          "max_per_walker": 11
+        },
+        "round_trip_duration": {
+          "n": 642,
+          "mean": 2714.221183800623,
+          "median": 2310.0,
+          "min": 310.0,
+          "max": 13520.0,
+          "sum": 1742530.0
+        },
+        "walkers_hit_both_edges": {
+          "count": 100,
+          "total": 100
+        },
+        "energy_drift": {
+          "energy_drift_abs_max": 0.0,
+          "energy_drift_abs_max_global": 0.0,
+          "energy_drift_recompute_count_total": 400000
+        },
+        "autocorrelation": {
+          "energies_tau_int_sweeps": {
+            "n": 100,
+            "mean": 1.9331127237632892,
+            "median": 2.082713384066607,
+            "min": 0.6945399446974301,
+            "max": 2.846451430797013,
+            "sum": 193.31127237632893
+          },
+          "z2_order2_tau_int_sweeps": {
+            "n": 100,
+            "mean": 1.455036369784528,
+            "median": 1.6726162644499456,
+            "min": 0.5,
+            "max": 2.247232202096141,
+            "sum": 145.50363697845282
+          },
+          "z2_order_abs_tau_int_sweeps": {
+            "n": 100,
+            "mean": 1.5847049929730417,
+            "median": 1.8953360635586145,
+            "min": 0.5,
+            "max": 2.42107806747688,
+            "sum": 158.47049929730417
+          }
+        },
+        "autocorrelation_sample_strides": {
+          "energies": 1,
+          "z2_order_abs": 5,
+          "z2_order2": 5
+        }
+      },
+      "32": {
+        "specific_heat_peak": {
+          "T": 2.2947888374328613,
+          "value": 1.9122676032936834
+        },
+        "susceptibility_peak": {
+          "T": 2.33424711227417,
+          "value": 20.788764311593837
+        },
+        "swap_acceptance": {
+          "mean": 0.8979303030303032,
+          "min": 0.7351,
+          "max": 0.95195,
+          "accepted_total": 1777902,
+          "attempts_total": 1980000
+        },
+        "local_acceptance": {
+          "local": {
+            "mean": 0.17364058559570314,
+            "min": 0.143184658203125,
+            "max": 0.20215416015625,
+            "accepted_total": 3556159193,
+            "attempted_total": 20480000000
+          }
+        },
+        "round_trips": {
+          "total": 453,
+          "walkers_with_round_trips": 100,
+          "max_per_walker": 8
+        },
+        "commutes": {
+          "total": 500,
+          "walkers_with_commutes": 100,
+          "max_per_walker": 8
+        },
+        "round_trip_duration": {
+          "n": 453,
+          "mean": 3662.0529801324506,
+          "median": 3120.0,
+          "min": 500.0,
+          "max": 17500.0,
+          "sum": 1658910.0
+        },
+        "walkers_hit_both_edges": {
+          "count": 100,
+          "total": 100
+        },
+        "energy_drift": {
+          "energy_drift_abs_max": 0.0,
+          "energy_drift_abs_max_global": 0.0,
+          "energy_drift_recompute_count_total": 400000
+        },
+        "autocorrelation": {
+          "energies_tau_int_sweeps": {
+            "n": 100,
+            "mean": 2.140436399085331,
+            "median": 2.1220011865789035,
+            "min": 0.7030294146692161,
+            "max": 3.6876346970415095,
+            "sum": 214.04363990853307
+          },
+          "z2_order2_tau_int_sweeps": {
+            "n": 100,
+            "mean": 2.1133294837299887,
+            "median": 2.2634559698995194,
+            "min": 0.5,
+            "max": 3.7956728498099364,
+            "sum": 211.33294837299886
+          },
+          "z2_order_abs_tau_int_sweeps": {
+            "n": 100,
+            "mean": 2.200852480652225,
+            "median": 2.470467090586455,
+            "min": 0.5,
+            "max": 3.9686556826758896,
+            "sum": 220.0852480652225
+          }
+        },
+        "autocorrelation_sample_strides": {
+          "energies": 1,
+          "z2_order_abs": 5,
+          "z2_order2": 5
+        }
+      },
+      "64": {
+        "specific_heat_peak": {
+          "T": 2.2819607257843018,
+          "value": 2.2789020302734757
+        },
+        "susceptibility_peak": {
+          "T": 2.3012607097625732,
+          "value": 69.69199438630321
+        },
+        "swap_acceptance": {
+          "mean": 0.798840909090909,
+          "min": 0.4863,
+          "max": 0.89995,
+          "accepted_total": 1581705,
+          "attempts_total": 1980000
+        },
+        "local_acceptance": {
+          "local": {
+            "mean": 0.17508866874999995,
+            "min": 0.12504596313476563,
+            "max": 0.27656206909179687,
+            "accepted_total": 14343263744,
+            "attempted_total": 81920000000
+          }
+        },
+        "round_trips": {
+          "total": 194,
+          "walkers_with_round_trips": 97,
+          "max_per_walker": 4
+        },
+        "commutes": {
+          "total": 239,
+          "walkers_with_commutes": 98,
+          "max_per_walker": 4
+        },
+        "round_trip_duration": {
+          "n": 194,
+          "mean": 7049.1752577319585,
+          "median": 6030.0,
+          "min": 720.0,
+          "max": 19270.0,
+          "sum": 1367540.0
+        },
+        "walkers_hit_both_edges": {
+          "count": 98,
+          "total": 100
+        },
+        "energy_drift": {
+          "energy_drift_abs_max": 0.0,
+          "energy_drift_abs_max_global": 0.0,
+          "energy_drift_recompute_count_total": 400000
+        },
+        "autocorrelation": {
+          "energies_tau_int_sweeps": {
+            "n": 100,
+            "mean": 2.3231754487130085,
+            "median": 2.158326363824111,
+            "min": 0.700256592571246,
+            "max": 4.95223963206767,
+            "sum": 232.31754487130087
+          },
+          "z2_order2_tau_int_sweeps": {
+            "n": 100,
+            "mean": 2.9370788170664075,
+            "median": 2.565009600603517,
+            "min": 0.5,
+            "max": 6.9468279629097704,
+            "sum": 293.70788170664076
+          },
+          "z2_order_abs_tau_int_sweeps": {
+            "n": 100,
+            "mean": 2.9515591391412146,
+            "median": 2.619207928575866,
+            "min": 0.5,
+            "max": 6.983129286255462,
+            "sum": 295.15591391412147
+          }
+        },
+        "autocorrelation_sample_strides": {
+          "energies": 1,
+          "z2_order_abs": 5,
+          "z2_order2": 5
+        }
+      }
+    }
+  },
+  "runs": {
+    "16": {
+      "source_file": "outputs\\ising_gpu\\ising2d_gpu_L16.npz",
+      "extra_observables": [],
+      "autocorrelation_keys": [
+        "energies",
+        "z2_order_abs",
+        "z2_order2"
+      ],
+      "autocorrelation_sample_strides": {
+        "energies": 1,
+        "z2_order_abs": 5,
+        "z2_order2": 5
+      },
+      "bkt_intersection": null
+    },
+    "32": {
+      "source_file": "outputs\\ising_gpu\\ising2d_gpu_L32.npz",
+      "extra_observables": [],
+      "autocorrelation_keys": [
+        "energies",
+        "z2_order_abs",
+        "z2_order2"
+      ],
+      "autocorrelation_sample_strides": {
+        "energies": 1,
+        "z2_order_abs": 5,
+        "z2_order2": 5
+      },
+      "bkt_intersection": null
+    },
+    "64": {
+      "source_file": "outputs\\ising_gpu\\ising2d_gpu_L64.npz",
+      "extra_observables": [],
+      "autocorrelation_keys": [
+        "energies",
+        "z2_order_abs",
+        "z2_order2"
+      ],
+      "autocorrelation_sample_strides": {
+        "energies": 1,
+        "z2_order_abs": 5,
+        "z2_order2": 5
+      },
+      "bkt_intersection": null
+    }
+  }
+}

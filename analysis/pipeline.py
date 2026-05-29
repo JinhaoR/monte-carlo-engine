@@ -127,6 +127,7 @@ def analyze_run(
     order_parameter_per_site: bool = False,
     record_stride: int = 1,
     autocorrelation_keys: list[str] | None = None,
+    autocorrelation_sample_strides: dict[str, int] | None = None,
     extra_observable_specs: dict[str, dict[str, str]] | None = None,
     helicity_history_n_bins: int = 20,
     estimate_bkt: bool = True,
@@ -250,6 +251,7 @@ def analyze_run(
             data,
             record_stride=record_stride,
             autocorrelation_keys=autocorrelation_keys,
+            autocorrelation_sample_strides=autocorrelation_sample_strides,
         )
     )
     obs["temps"] = temps

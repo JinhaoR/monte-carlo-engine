@@ -163,7 +163,6 @@ class BaseModel(ABC):
         L: int,
         R: int,
         rng: np.random.Generator,
-        field_step: float,
         threads_per_block: int,
         full_site_blocks: int,
         update_blocks_per_walker: int,

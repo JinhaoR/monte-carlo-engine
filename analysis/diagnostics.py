@@ -223,11 +223,17 @@ def compute_autocorrelation_by_temperature(
     *,
     max_lag: int | None = None,
     window_c: float = 5.0,
+    sample_stride: int = 1,
 ) -> dict[str, np.ndarray]:
     """
     Compute autocorrelation summaries for each temperature row.
     Input shape:
         (n_temps, n_measurements)
+
+    tau_int_sweeps estimates the physical integrated autocorrelation time in
+    sweep units from thinned samples.  The 1/2 white-noise baseline is not
+    scaled by sample_stride; otherwise changing the measurement stride would
+    create an artificial stride/2 floor.
     """
     values = np.asarray(values, dtype=np.float64)
     if values.ndim != 2:
@@ -235,9 +241,13 @@ def compute_autocorrelation_by_temperature(
             "values must have shape (n_temps, n_measurements). "
             f"Got {values.shape}."
         )
+    sample_stride = max(1, int(sample_stride))
     n_temps = values.shape[0]
     tau_int = np.full(n_temps, np.nan)
+    tau_int_sweeps = np.full(n_temps, np.nan)
+    tau_int_sampling_gap_sweeps = np.full(n_temps, np.nan)
     window = np.zeros(n_temps, dtype=np.int64)
+    window_sweeps = np.zeros(n_temps, dtype=np.int64)
     n = np.zeros(n_temps, dtype=np.int64)
     n_eff = np.full(n_temps, np.nan)
     rho1 = np.full(n_temps, np.nan)
@@ -251,7 +261,11 @@ def compute_autocorrelation_by_temperature(
             window_c=window_c,
         )
         tau_int[r] = result.tau_int
+        tau_excess = max(0.0, result.tau_int - 0.5)
+        tau_int_sweeps[r] = 0.5 + sample_stride * tau_excess
+        tau_int_sampling_gap_sweeps[r] = result.tau_int * sample_stride
         window[r] = result.window
+        window_sweeps[r] = result.window * sample_stride
         n[r] = result.n
         n_eff[r] = result.n_eff
         rho1[r] = result.rho1
@@ -260,13 +274,17 @@ def compute_autocorrelation_by_temperature(
         autocorr_error[r] = result.autocorr_error
     return {
         "tau_int": tau_int,
+        "tau_int_sweeps": tau_int_sweeps,
+        "tau_int_sampling_gap_sweeps": tau_int_sampling_gap_sweeps,
         "autocorr_window": window,
+        "autocorr_window_sweeps": window_sweeps,
         "autocorr_n": n,
         "n_eff": n_eff,
         "rho1": rho1,
         "autocorr_mean": mean,
         "naive_error": naive_error,
         "autocorr_error": autocorr_error,
+        "sample_stride_sweeps": np.full(n_temps, sample_stride, dtype=np.int64),
     }
 
 def compute_run_diagnostics(
@@ -274,6 +292,7 @@ def compute_run_diagnostics(
     *,
     record_stride: int = 1,
     autocorrelation_keys: list[str] | None = None,
+    autocorrelation_sample_strides: dict[str, int] | None = None,
     max_lag: int | None = None,
     window_c: float = 5.0,
 ) -> dict[str, Any]:
@@ -330,16 +349,20 @@ def compute_run_diagnostics(
         )
     if autocorrelation_keys is None:
         autocorrelation_keys = []
+    if autocorrelation_sample_strides is None:
+        autocorrelation_sample_strides = {}
     for key in autocorrelation_keys:
         if key not in data:
             continue
         values = np.asarray(data[key])
         if values.ndim != 2:
             continue
+        sample_stride = int(autocorrelation_sample_strides.get(key, 1))
         ac = compute_autocorrelation_by_temperature(
             values,
             max_lag=max_lag,
             window_c=window_c,
+            sample_stride=sample_stride,
         )
         for ac_key, ac_value in ac.items():
             diagnostics[f"{key}_{ac_key}"] = ac_value

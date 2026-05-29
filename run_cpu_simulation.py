@@ -1,9 +1,6 @@
 from __future__ import annotations
 
-from ptmc.common.output import save_experiment_outputs
 from ptmc.cpu.experiment import run_pt_experiment as run_cpu_pt_experiment
-from ptmc.gpu.experiment import run_pt_experiment as run_gpu_pt_experiment
-from ptmc.cpu.models.xy import XYModel
 from ptmc.cpu.models.ising import IsingModel
 
 
@@ -15,9 +12,9 @@ def main() -> None:
         output_prefix="ising2d_cpu",
     )
 
-    experiment = run_cpu_pt_experiment(
+    run_cpu_pt_experiment(
         model=model,
-        L_values=[16, 32, 64],
+        L_values=[16, 32],
         T_min=1.5,
         T_max=3.5,
         n_T=64,
@@ -36,11 +33,6 @@ def main() -> None:
         energy_drift_tolerance_per_site=1.0e-10,
         store_primary_histories=False,
         observable_n_blocks=20,
-    )
-
-    save_experiment_outputs(
-        experiment,
-        model=model,
         output_dir="outputs/ising_cpu",
     )
 

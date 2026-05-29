@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime
 import json
 import re
 from pathlib import Path
@@ -13,6 +14,12 @@ OUTPUT_SCHEMA_VERSION = 1
 class ModelLike(Protocol):
     def metadata(self) -> dict[str, Any]:
         raise NotImplementedError
+
+def local_timestamp() -> str:
+    """
+    Return a local timezone timestamp for manifests and run parameters.
+    """
+    return datetime.now().astimezone().isoformat(timespec="seconds")
 
 def json_default(value: Any) -> Any:
     """
@@ -118,6 +125,118 @@ def write_manifest(
     )
     return manifest_path
 
+def start_experiment_output(
+    *,
+    model: ModelLike,
+    output_dir: str | Path,
+    L_values: list[int],
+    temps: Any,
+    ladder_diagnostics: dict[str, Any],
+    parameters: dict[str, Any],
+    output_prefix: str | None = None,
+    started_at: str | None = None,
+) -> tuple[Path, str, Path, dict[str, Any]]:
+    """
+    Create an output directory and initial manifest before simulations start.
+    """
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    if output_prefix is None:
+        output_prefix = model_output_prefix(model)
+    else:
+        output_prefix = safe_output_token(output_prefix)
+    if started_at is None:
+        started_at = local_timestamp()
+    manifest_path = output_dir / "manifest.json"
+    manifest: dict[str, Any] = {
+        "schema_version": OUTPUT_SCHEMA_VERSION,
+        "output_dir": str(output_dir.resolve()),
+        "output_prefix": output_prefix,
+        "started_at": started_at,
+        "completed_at": None,
+        "last_updated_at": started_at,
+        "model_metadata": model.metadata(),
+        "L_values": [int(L) for L in L_values],
+        "temps": temps,
+        "ladder_diagnostics": ladder_diagnostics,
+        "parameters": parameters,
+        "files": [],
+        "runs": {},
+    }
+    write_manifest(manifest_path, manifest)
+    print(f"Wrote initial manifest to {manifest_path}", flush=True)
+    return output_dir, output_prefix, manifest_path, manifest
+
+def save_l_output(
+    *,
+    output_dir: Path,
+    output_prefix: str,
+    manifest_path: Path,
+    manifest: dict[str, Any],
+    model_metadata: dict[str, Any],
+    parameters: dict[str, Any],
+    L: int,
+    result: dict[str, Any],
+    started_at: str,
+    completed_at: str,
+) -> Path:
+    """
+    Save one L result immediately and update the manifest.
+    """
+    L_int = int(L)
+    filename = run_output_filename(output_prefix, L_int)
+    out_path = output_dir / filename
+    params_for_this_L = {
+        **parameters,
+        "L": L_int,
+        "model": model_metadata,
+        "output_prefix": output_prefix,
+        "experiment_started_at": manifest.get("started_at"),
+        "L_started_at": started_at,
+        "L_completed_at": completed_at,
+    }
+    save_result_npz(
+        out_path,
+        L=L_int,
+        result=result,
+        params=params_for_this_L,
+    )
+    files = [
+        str(existing)
+        for existing in manifest.get("files", [])
+        if str(existing) != filename
+    ]
+    files.append(filename)
+    manifest["files"] = files
+    manifest.setdefault("runs", {})[str(L_int)] = {
+        "L": L_int,
+        "file": filename,
+        "started_at": started_at,
+        "completed_at": completed_at,
+    }
+    manifest["last_updated_at"] = local_timestamp()
+    write_manifest(manifest_path, manifest)
+    print(f"Saved {out_path}", flush=True)
+    print(f"Updated manifest after L={L_int}: {manifest_path}", flush=True)
+    return out_path
+
+def finish_experiment_output(
+    *,
+    manifest_path: Path,
+    manifest: dict[str, Any],
+    completed_at: str | None = None,
+) -> Path:
+    """
+    Mark the manifest as complete after all requested sizes finish.
+    """
+    if completed_at is None:
+        completed_at = local_timestamp()
+    manifest["completed_at"] = completed_at
+    manifest["last_updated_at"] = completed_at
+    write_manifest(manifest_path, manifest)
+    print(f"Finalized manifest: {manifest_path}", flush=True)
+    return manifest_path
+
 def save_experiment_outputs(
     experiment: dict[str, Any],
     *,
@@ -129,43 +248,39 @@ def save_experiment_outputs(
     Save all results from run_pt_experiment(...).
     This writes one .npz file per L and one manifest.json file.
     """
-    output_dir = Path(output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
-    if output_prefix is None:
-        output_prefix = model_output_prefix(model)
-    else:
-        output_prefix = safe_output_token(output_prefix)
     results_by_L = experiment["results_by_L"]
-    manifest: dict[str, Any] = {
-        "schema_version": OUTPUT_SCHEMA_VERSION,
-        "output_dir": str(output_dir.resolve()),
-        "output_prefix": output_prefix,
-        "model_metadata": experiment.get("model_metadata", model.metadata()),
-        "L_values": experiment["L_values"],
-        "temps": experiment["temps"],
-        "ladder_diagnostics": experiment["ladder_diagnostics"],
-        "parameters": experiment["parameters"],
-        "files": [],
-    }
+    model_metadata = experiment.get("model_metadata", model.metadata())
+    output_dir, output_prefix, manifest_path, manifest = start_experiment_output(
+        model=model,
+        output_dir=output_dir,
+        output_prefix=output_prefix,
+        L_values=experiment["L_values"],
+        temps=experiment["temps"],
+        ladder_diagnostics=experiment["ladder_diagnostics"],
+        parameters=experiment["parameters"],
+        started_at=experiment.get("started_at"),
+    )
+    run_times = experiment.get("runs", {})
     for L, result in results_by_L.items():
         L_int = int(L)
-        params_for_this_L = {
-            **experiment["parameters"],
-            "L": L_int,
-            "model": experiment.get("model_metadata", model.metadata()),
-            "output_prefix": output_prefix,
-        }
-        filename = run_output_filename(output_prefix, L_int)
-        out_path = output_dir / filename
-        save_result_npz(
-            out_path,
+        timing = run_times.get(str(L_int), {})
+        started_at = timing.get("started_at") or local_timestamp()
+        completed_at = timing.get("completed_at") or started_at
+        save_l_output(
+            output_dir=output_dir,
+            output_prefix=output_prefix,
+            manifest_path=manifest_path,
+            manifest=manifest,
+            model_metadata=model_metadata,
+            parameters=experiment["parameters"],
             L=L_int,
             result=result,
-            params=params_for_this_L,
+            started_at=started_at,
+            completed_at=completed_at,
         )
-        manifest["files"].append(filename)
-        print(f"Saved {out_path}", flush=True)
-    manifest_path = output_dir / "manifest.json"
-    write_manifest(manifest_path, manifest)
-    print(f"Wrote manifest to {manifest_path}", flush=True)
+    finish_experiment_output(
+        manifest_path=manifest_path,
+        manifest=manifest,
+        completed_at=experiment.get("completed_at"),
+    )
     return manifest

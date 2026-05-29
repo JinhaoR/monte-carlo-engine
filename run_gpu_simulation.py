@@ -1,7 +1,4 @@
 from __future__ import annotations
-import math
-from ptmc.common.output import save_experiment_outputs
-from ptmc.cpu.experiment import run_pt_experiment as run_cpu_pt_experiment
 from ptmc.gpu.experiment import run_pt_experiment as run_gpu_pt_experiment
 from ptmc.gpu.models.xy import XYModel
 from ptmc.gpu.models.ising import IsingModel
@@ -11,43 +8,40 @@ def main() -> None:
         J=1.0,
         h=0.0,
         ordered_start=False,
-        output_prefix="ising2d_cpu",
+        output_prefix="ising2d_gpu",
     )
-    experiment = run_gpu_pt_experiment(
+    run_gpu_pt_experiment(
         model=model,
         L_values=[16, 32, 64],
         T_min=1.5,
-        T_max=3.5,
-        n_T=64,
+        T_max=3,
+        n_T=100,
         ladder_method="beta",
         dense_near_tc=True,
         T_focus=2.269185314213022,
         tc_window=0.4,
         tc_fraction=0.60,
-        n_equil_sweeps=50_000,
-        n_measure_sweeps=100_000,
+        n_equil_sweeps=200_000,
+        n_measure_sweeps=200_000,
         sweeps_between_swaps=10,
         record_stride=10,
-        derived_observable_stride=50,
+        derived_observable_stride=5,
         rng_seed=1234,
         energy_recompute_stride=100,
         energy_drift_tolerance_per_site=1.0e-10,
-        store_primary_histories=False,
+        store_primary_histories=True,
         observable_n_blocks=20,
-    )
-    save_experiment_outputs(
-        experiment,
-        model=model,
         output_dir="outputs/ising_gpu",
     )
 
 
     """model = XYModel(
         J=1.0,
+        theta_step=1.5707963267948966,
         ordered_start=False,
         output_prefix="xy2d",
     )
-    experiment = run_pt_experiment(
+    experiment = run_gpu_pt_experiment(
         model=model,
         L_values=[16, 32, 64],
         T_min=0.6,
@@ -64,7 +58,6 @@ def main() -> None:
         record_stride=10,
         derived_observable_stride=50,
         rng_seed=1234,
-        field_step=math.pi / 2.0,
         threads_per_block=128,
         energy_recompute_stride=0,
         store_primary_histories=False,
