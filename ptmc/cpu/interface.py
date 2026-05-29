@@ -10,10 +10,11 @@ class BaseCPUModel(ABC):
     """
     Minimal contract for the CPU benchmark runner.
 
-    CPU models own their NumPy state and one single-site Metropolis update.
-    The runner only handles parallel tempering, bookkeeping, and measurement
-    storage.
+    CPU models own their NumPy state representation and batched update sweep.
+    The runner handles parallel tempering, bookkeeping, and measurement storage.
     """
+
+    needs_proposal_randoms = False
 
     def validate_lattice(self, L: int) -> None:
         L = int(L)
@@ -24,25 +25,30 @@ class BaseCPUModel(ABC):
         self.validate_lattice(L)
         return int(L) * int(L)
 
+    def prepare_states(self, states: list[Any]) -> Any:
+        return states
+
+    @abstractmethod
+    def sweep_walkers(
+        self,
+        *,
+        states: Any,
+        betas_by_walker: np.ndarray,
+        energy_by_walker: np.ndarray,
+        sites_by_walker: np.ndarray,
+        accept_randoms: np.ndarray,
+        proposal_randoms: np.ndarray | None,
+        local_update_attempts: np.ndarray,
+        local_update_acceptance: np.ndarray,
+    ) -> None:
+        raise NotImplementedError
+
     @abstractmethod
     def initial_state(self, L: int, rng: np.random.Generator) -> Any:
         raise NotImplementedError
 
     @abstractmethod
     def energy(self, state: Any) -> float:
-        raise NotImplementedError
-
-    @abstractmethod
-    def metropolis_step(
-        self,
-        state: Any,
-        site: int,
-        beta: float,
-        rng: np.random.Generator,
-    ) -> tuple[float, bool]:
-        """
-        Mutate one site if accepted and return (delta_energy, accepted).
-        """
         raise NotImplementedError
 
     @abstractmethod
@@ -73,7 +79,7 @@ def validate_cpu_model(model: Any) -> BaseCPUModel:
                 "sweep_sites_per_walker",
                 "initial_state",
                 "energy",
-                "metropolis_step",
+                "sweep_walkers",
                 "measure_observables",
                 "metadata",
             )

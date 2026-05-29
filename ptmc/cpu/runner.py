@@ -108,10 +108,11 @@ class ParallelTemperingCPU:
         self.N = self.L * self.L
         self.sites_per_sweep = int(self.model.sweep_sites_per_walker(self.L))
 
-        self.states = [
+        initial_states = [
             self.model.initial_state(self.L, self.rng)
             for _ in range(self.R)
         ]
+        self.states = self.model.prepare_states(initial_states)
         self.energy_by_walker = np.asarray(
             [self.model.energy(state) for state in self.states],
             dtype=np.float64,
@@ -136,20 +137,26 @@ class ParallelTemperingCPU:
         self._label_positions: list[np.ndarray] = []
 
     def _advance_model_state(self) -> None:
-        for walker, state in enumerate(self.states):
-            beta = float(self.betas_by_walker[walker])
-            for _ in range(self.sites_per_sweep):
-                site = int(self.rng.integers(self.N))
-                dE, accepted = self.model.metropolis_step(
-                    state,
-                    site,
-                    beta,
-                    self.rng,
-                )
-                self.local_update_attempts[walker] += 1
-                if accepted:
-                    self.energy_by_walker[walker] += float(dE)
-                    self.local_update_acceptance[walker] += 1
+        shape = (self.R, self.sites_per_sweep)
+        sites_by_walker = self.rng.integers(
+            self.N,
+            size=shape,
+            dtype=np.int64,
+        )
+        self.model.sweep_walkers(
+            states=self.states,
+            betas_by_walker=self.betas_by_walker,
+            energy_by_walker=self.energy_by_walker,
+            sites_by_walker=sites_by_walker,
+            accept_randoms=self.rng.random(size=shape),
+            proposal_randoms=(
+                self.rng.random(size=shape)
+                if self.model.needs_proposal_randoms
+                else None
+            ),
+            local_update_attempts=self.local_update_attempts,
+            local_update_acceptance=self.local_update_acceptance,
+        )
 
     def _maybe_recompute_energy(self, sweeps_completed: int) -> None:
         if self.energy_recompute_stride <= 0:
@@ -196,16 +203,17 @@ class ParallelTemperingCPU:
         self._label_positions.append(self.slot_of_walker.copy())
         self._label_record_times.append(int(t_index))
 
-    def _measure_by_slot(self) -> dict[str, np.ndarray]:
-        values: dict[str, np.ndarray] = {
-            "energy": np.empty(self.R, dtype=np.float64),
-            "energy2": np.empty(self.R, dtype=np.float64),
+    def _measure_primary_by_slot(self) -> dict[str, np.ndarray]:
+        energy = self.energy_by_walker[self.walker_of_slot]
+        return {
+            "energy": energy,
+            "energy2": energy * energy,
         }
+
+    def _measure_derived_by_slot(self) -> dict[str, np.ndarray]:
+        values: dict[str, np.ndarray] = {}
         for slot in range(self.R):
             walker = int(self.walker_of_slot[slot])
-            energy = float(self.energy_by_walker[walker])
-            values["energy"][slot] = energy
-            values["energy2"][slot] = energy * energy
             obs = self.model.measure_observables(
                 self.states[walker],
                 float(self.betas[slot]),
@@ -293,10 +301,19 @@ class ParallelTemperingCPU:
         store_primary_histories: bool = True,
         observable_n_blocks: int = 20,
     ) -> dict[str, Any]:
-        del derived_observable_stride
+        derived_observable_stride = int(derived_observable_stride)
+        if derived_observable_stride <= 0:
+            raise ValueError("derived_observable_stride must be positive.")
         observable_n_blocks = int(observable_n_blocks)
         if observable_n_blocks <= 0:
             raise ValueError("observable_n_blocks must be positive.")
+        derived_observable_measure_sweeps = np.arange(
+            0,
+            self.n_measure_sweeps,
+            derived_observable_stride,
+            dtype=np.int32,
+        )
+        n_derived_meas = int(derived_observable_measure_sweeps.size)
 
         t_counter = 0
         for sweep in range(self.n_equil_sweeps):
@@ -311,7 +328,9 @@ class ParallelTemperingCPU:
         self.local_update_attempts.fill(0)
         self.local_update_acceptance.fill(0)
 
-        samples: dict[str, np.ndarray] = {}
+        primary_samples: dict[str, np.ndarray] = {}
+        derived_samples: dict[str, np.ndarray] = {}
+        derived_col = 0
         for meas_idx in range(self.n_measure_sweeps):
             self._advance_model_state()
             self._maybe_recompute_energy(self.n_equil_sweeps + meas_idx + 1)
@@ -321,9 +340,9 @@ class ParallelTemperingCPU:
                 if t_counter % self.record_stride == 0:
                     self._record_positions(t_counter)
 
-            measured = self._measure_by_slot()
-            if not samples:
-                samples = {
+            measured = self._measure_primary_by_slot()
+            if not primary_samples:
+                primary_samples = {
                     key: np.empty(
                         (self.R, self.n_measure_sweeps),
                         dtype=np.float64,
@@ -331,30 +350,46 @@ class ParallelTemperingCPU:
                     for key in measured
                 }
             for key, value in measured.items():
-                samples[key][:, meas_idx] = value
+                primary_samples[key][:, meas_idx] = value
+
+            if meas_idx % derived_observable_stride == 0:
+                measured = self._measure_derived_by_slot()
+                if measured and not derived_samples:
+                    derived_samples = {
+                        key: np.empty(
+                            (self.R, n_derived_meas),
+                            dtype=np.float64,
+                        )
+                        for key in measured
+                    }
+                for key, value in measured.items():
+                    derived_samples[key][:, derived_col] = value
+                derived_col += 1
 
         n_blocks, block_size = _block_count_and_size(
             self.n_measure_sweeps,
             observable_n_blocks,
         )
+        n_derived_blocks, derived_block_size = _block_count_and_size(
+            n_derived_meas,
+            observable_n_blocks,
+        )
         result: dict[str, Any] = {
             "temps": self.temps.astype(np.float32),
             "betas": self.betas.astype(np.float32),
-            "derived_observable_measure_sweeps": np.arange(
-                self.n_measure_sweeps,
-                dtype=np.int32,
-            ),
+            "derived_observable_measure_sweeps": derived_observable_measure_sweeps,
             "energy_block_means": _block_means(
-                samples["energy"],
+                primary_samples["energy"],
                 n_blocks,
                 block_size,
             ),
             "energy2_block_means": _block_means(
-                samples["energy2"],
+                primary_samples["energy2"],
                 n_blocks,
                 block_size,
             ),
             "observable_block_size": np.int32(block_size),
+            "derived_observable_block_size": np.int32(derived_block_size),
             "swap_acceptance": self.swap_acceptance,
             "swap_attempts": self.swap_attempts,
             "local_update_attempts": self.local_update_attempts,
@@ -372,27 +407,29 @@ class ParallelTemperingCPU:
                 self.energy_drift_recompute_corrections
             ),
         }
-        for key, value in samples.items():
-            if key in {"energy", "energy2"}:
-                continue
+        for key, value in derived_samples.items():
             if key in {"order_parameter", "helicity"}:
                 continue
             result[f"{key}_block_means"] = _block_means(
                 value,
-                n_blocks,
-                block_size,
+                n_derived_blocks,
+                derived_block_size,
             )
-        if "helicity_Kx" in samples:
-            result["helicity_observable_block_size"] = np.int32(block_size)
+        if "helicity_Kx" in derived_samples:
+            result["helicity_observable_block_size"] = np.int32(
+                derived_block_size
+            )
 
         if store_primary_histories:
-            result["energies"] = samples["energy"].astype(np.float32)
-            if "order_parameter" in samples:
-                result["order_parameter"] = samples["order_parameter"].astype(
+            result["energies"] = primary_samples["energy"].astype(np.float32)
+            if "order_parameter" in derived_samples:
+                result["order_parameter"] = derived_samples[
+                    "order_parameter"
+                ].astype(np.float32)
+            if "helicity" in derived_samples:
+                result["helicities"] = derived_samples["helicity"].astype(
                     np.float32
                 )
-            if "helicity" in samples:
-                result["helicities"] = samples["helicity"].astype(np.float32)
 
         label_pos_arr = (
             np.asarray(self._label_positions, dtype=np.int32)

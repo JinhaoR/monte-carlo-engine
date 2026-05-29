@@ -2,11 +2,68 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import math
-from typing import Any
 
+from numba import njit, prange
 import numpy as np
 
 from ptmc.cpu.interface import BaseCPUModel
+
+
+@njit(parallel=True)
+def _xy_sweep_walkers_numba(
+    states: np.ndarray,
+    betas_by_walker: np.ndarray,
+    energy_by_walker: np.ndarray,
+    sites_by_walker: np.ndarray,
+    accept_randoms: np.ndarray,
+    proposal_randoms: np.ndarray,
+    local_update_attempts: np.ndarray,
+    local_update_acceptance: np.ndarray,
+    J: float,
+    theta_step: float,
+) -> None:
+    R = states.shape[0]
+    L = states.shape[1]
+    n_steps = sites_by_walker.shape[1]
+    two_pi = 2.0 * math.pi
+    for walker in prange(R):
+        beta = betas_by_walker[walker]
+        energy_delta = 0.0
+        accepted_count = 0
+        for step in range(n_steps):
+            site = sites_by_walker[walker, step]
+            i = site // L
+            j = site - i * L
+            ip = 0 if i + 1 == L else i + 1
+            im = L - 1 if i == 0 else i - 1
+            jp = 0 if j + 1 == L else j + 1
+            jm = L - 1 if j == 0 else j - 1
+            old = states[walker, i, j]
+            new = old + (2.0 * proposal_randoms[walker, step] - 1.0) * theta_step
+
+            old_sum = 0.0
+            new_sum = 0.0
+            neighbor = states[walker, ip, j]
+            old_sum += math.cos(old - neighbor)
+            new_sum += math.cos(new - neighbor)
+            neighbor = states[walker, im, j]
+            old_sum += math.cos(old - neighbor)
+            new_sum += math.cos(new - neighbor)
+            neighbor = states[walker, i, jp]
+            old_sum += math.cos(old - neighbor)
+            new_sum += math.cos(new - neighbor)
+            neighbor = states[walker, i, jm]
+            old_sum += math.cos(old - neighbor)
+            new_sum += math.cos(new - neighbor)
+
+            dE = J * (old_sum - new_sum)
+            if dE <= 0.0 or accept_randoms[walker, step] < math.exp(-beta * dE):
+                states[walker, i, j] = new % two_pi
+                energy_delta += dE
+                accepted_count += 1
+        energy_by_walker[walker] += energy_delta
+        local_update_attempts[walker] += n_steps
+        local_update_acceptance[walker] += accepted_count
 
 
 @dataclass(frozen=True)
@@ -20,6 +77,37 @@ class XYModel(BaseCPUModel):
     ordered_start: bool = False
     name: str = "xy_cpu"
     output_prefix: str = "xy2d_cpu"
+    needs_proposal_randoms = True
+
+    def prepare_states(self, states: list[np.ndarray]) -> np.ndarray:
+        return np.ascontiguousarray(np.stack(states, axis=0), dtype=np.float64)
+
+    def sweep_walkers(
+        self,
+        *,
+        states: np.ndarray,
+        betas_by_walker: np.ndarray,
+        energy_by_walker: np.ndarray,
+        sites_by_walker: np.ndarray,
+        accept_randoms: np.ndarray,
+        proposal_randoms: np.ndarray | None,
+        local_update_attempts: np.ndarray,
+        local_update_acceptance: np.ndarray,
+    ) -> None:
+        if proposal_randoms is None:
+            raise ValueError("XYModel requires proposal_randoms.")
+        _xy_sweep_walkers_numba(
+            states,
+            betas_by_walker,
+            energy_by_walker,
+            sites_by_walker,
+            accept_randoms,
+            proposal_randoms,
+            local_update_attempts,
+            local_update_acceptance,
+            float(self.J),
+            float(self.theta_step),
+        )
 
     def initial_state(
         self,
@@ -36,37 +124,6 @@ class XYModel(BaseCPUModel):
         e_down = np.cos(theta - np.roll(theta, -1, axis=0))
         e_right = np.cos(theta - np.roll(theta, -1, axis=1))
         return float(-self.J * (np.sum(e_down) + np.sum(e_right)))
-
-    def metropolis_step(
-        self,
-        state: np.ndarray,
-        site: int,
-        beta: float,
-        rng: np.random.Generator,
-    ) -> tuple[float, bool]:
-        L = state.shape[0]
-        i = int(site) // L
-        j = int(site) - i * L
-        old = float(state[i, j])
-        new = old + rng.uniform(-self.theta_step, self.theta_step)
-
-        old_sum = 0.0
-        new_sum = 0.0
-        for ni, nj in (
-            ((i + 1) % L, j),
-            ((i - 1) % L, j),
-            (i, (j + 1) % L),
-            (i, (j - 1) % L),
-        ):
-            neighbor = float(state[ni, nj])
-            old_sum += math.cos(old - neighbor)
-            new_sum += math.cos(new - neighbor)
-        dE = self.J * (old_sum - new_sum)
-        accepted = dE <= 0.0 or rng.random() < math.exp(-float(beta) * dE)
-        if accepted:
-            state[i, j] = new % (2.0 * math.pi)
-            return float(dE), True
-        return 0.0, False
 
     def measure_observables(
         self,
@@ -93,7 +150,7 @@ class XYModel(BaseCPUModel):
             "helicity": 0.5 * (Yx + Yy),
         }
 
-    def metadata(self) -> dict[str, Any]:
+    def metadata(self) -> dict[str, object]:
         return {
             "model_name": self.name,
             "output_prefix": self.output_prefix,
