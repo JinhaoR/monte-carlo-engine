@@ -8,6 +8,8 @@ from ptmc.gpu.interface import BaseModel, validate_pt_model
 from ptmc.gpu.kernels import (
     parallel_tempering_swap_kernel,
     record_positions_kernel,
+    record_selected_positions_kernel,
+    record_selected_scalar_by_walker_kernel,
 )
 
 class ParallelTemperingGPU:
@@ -109,6 +111,13 @@ class ParallelTemperingGPU:
         self._label_record_count = 0
         self.d_label_positions = None
         self.derived_observable_measure_sweeps = np.empty(0, dtype=np.int32)
+        self.tracked_walkers = np.empty(0, dtype=np.int32)
+        self.tracked_observable_measure_sweeps = np.empty(0, dtype=np.int32)
+        self.tracked_walker_slots = np.empty((0, 0), dtype=np.int32)
+        self.d_tracked_walkers = None
+        self.d_tracked_walker_slots = None
+        self.d_tracked_energies = None
+        self.tracked_blocks = 0
 
     def _setup_launch_geometry(self) -> None:
         """
@@ -301,6 +310,149 @@ class ParallelTemperingGPU:
         self._label_record_times.append(int(t_index))
         self._label_record_count += 1
 
+    def _normalize_tracked_walkers(self, tracked_walkers: Any | None) -> np.ndarray:
+        """
+        Return unique walker IDs to track, preserving user-provided order.
+        """
+        if tracked_walkers is None:
+            return np.empty(0, dtype=np.int32)
+        if isinstance(tracked_walkers, (int, np.integer)):
+            raw_walkers = [int(tracked_walkers)]
+        else:
+            raw_walkers = [int(walker) for walker in tracked_walkers]
+
+        unique_walkers: list[int] = []
+        seen: set[int] = set()
+        for walker in raw_walkers:
+            if walker in seen:
+                continue
+            if walker < 0 or walker >= self.R:
+                raise ValueError(
+                    "tracked_walkers must contain walker IDs in "
+                    f"[0, {self.R - 1}]. Got {walker}."
+                )
+            seen.add(walker)
+            unique_walkers.append(walker)
+        return np.asarray(unique_walkers, dtype=np.int32)
+
+    def _allocate_tracked_storage(
+        self,
+        tracked_walkers: Any | None,
+        n_derived_meas: int,
+    ) -> None:
+        """
+        Allocate lightweight tagged-walker histories sampled with derived observables.
+        """
+        self.tracked_walkers = self._normalize_tracked_walkers(tracked_walkers)
+        self.tracked_observable_measure_sweeps = (
+            self.derived_observable_measure_sweeps.copy()
+        )
+        n_tracked = int(self.tracked_walkers.size)
+        n_derived_meas = int(n_derived_meas)
+        self.tracked_walker_slots = np.empty(
+            (n_tracked, n_derived_meas),
+            dtype=np.int32,
+        )
+        self.tracked_blocks = (
+            (n_tracked + self.threads_per_block - 1) // self.threads_per_block
+            if n_tracked > 0
+            else 0
+        )
+        if n_tracked == 0 or n_derived_meas <= 0:
+            self.d_tracked_walkers = None
+            self.d_tracked_walker_slots = None
+            self.d_tracked_energies = None
+            return
+        self.d_tracked_walkers = cuda.to_device(self.tracked_walkers)
+        self.d_tracked_walker_slots = cuda.device_array(
+            (n_tracked, n_derived_meas),
+            dtype=np.int32,
+        )
+        self.d_tracked_energies = cuda.device_array(
+            (n_tracked, n_derived_meas),
+            dtype=np.float32,
+        )
+
+    def _record_tracked_observables_to_output(self, col: int) -> None:
+        """
+        Record selected tagged walkers at a derived-observable measurement.
+        """
+        if (
+            self.d_tracked_walkers is None
+            or self.d_tracked_walker_slots is None
+            or self.d_tracked_energies is None
+            or self.tracked_blocks <= 0
+        ):
+            return
+        record_selected_positions_kernel[
+            self.tracked_blocks,
+            self.threads_per_block,
+        ](
+            self.d_slot_of_walker,
+            self.d_tracked_walkers,
+            self.d_tracked_walker_slots,
+            col,
+        )
+        record_selected_scalar_by_walker_kernel[
+            self.tracked_blocks,
+            self.threads_per_block,
+        ](
+            self.runtime.energy_by_walker,
+            self.d_tracked_walkers,
+            self.d_tracked_energies,
+            col,
+        )
+
+    def _copy_tracked_measurements_to_host(
+        self,
+        measurements: dict[str, Any],
+    ) -> dict[str, np.ndarray]:
+        """
+        Build tagged-walker histories from tracked slots and slot observables.
+        """
+        n_tracked = int(self.tracked_walkers.size)
+        n_derived = int(self.derived_observable_measure_sweeps.size)
+        if n_tracked == 0:
+            return {}
+
+        tracked_slots = (
+            self.d_tracked_walker_slots.copy_to_host()
+            if self.d_tracked_walker_slots is not None
+            else np.empty((n_tracked, 0), dtype=np.int32)
+        )
+        self.tracked_walker_slots = tracked_slots
+        tracked: dict[str, np.ndarray] = {
+            "tracked_walkers": self.tracked_walkers.copy(),
+            "tracked_observable_measure_sweeps": (
+                self.tracked_observable_measure_sweeps.copy()
+            ),
+            "tracked_walker_slots": tracked_slots,
+        }
+        if tracked_slots.shape == (n_tracked, n_derived):
+            tracked["tracked_walker_temperatures"] = self.temps[tracked_slots]
+        else:
+            tracked["tracked_walker_temperatures"] = np.empty(
+                tracked_slots.shape,
+                dtype=np.float32,
+            )
+
+        if self.d_tracked_energies is not None:
+            tracked["tracked_energies"] = self.d_tracked_energies.copy_to_host()
+
+        if tracked_slots.shape != (n_tracked, n_derived):
+            return tracked
+
+        cols = np.arange(n_derived, dtype=np.int64)[np.newaxis, :]
+        for key, value in measurements.items():
+            arr = np.asarray(value)
+            if arr.ndim != 2 or arr.shape != (self.R, n_derived):
+                continue
+            tracked_key = f"tracked_{key}"
+            if tracked_key in tracked:
+                continue
+            tracked[tracked_key] = arr[tracked_slots, cols]
+        return tracked
+
     def _record_primary_observables_to_output(self, col: int) -> None:
         """
         Ask the model runtime to record primary observables.
@@ -400,6 +552,7 @@ class ParallelTemperingGPU:
         derived_observable_stride: int = 1,
         store_primary_histories: bool = True,
         observable_n_blocks: int = 20,
+        tracked_walkers: Any | None = None,
     ) -> dict[str, Any]:
         """
         Run equilibration, run measurements, and return a result dictionary.
@@ -425,6 +578,7 @@ class ParallelTemperingGPU:
             observable_n_blocks,
         )
         self._allocate_label_storage(record_during_equil)
+        self._allocate_tracked_storage(tracked_walkers, n_derived_meas)
         t_counter = 0
         derived_col = 0
         # -------------------------
@@ -464,12 +618,16 @@ class ParallelTemperingGPU:
             self._record_primary_observables_to_output(meas_idx)
             if meas_idx % derived_observable_stride == 0:
                 self._record_derived_observables_to_output(derived_col)
+                self._record_tracked_observables_to_output(derived_col)
                 derived_col += 1
 
         # -------------------------
         # Copy results back
         # -------------------------
         measurements = self.runtime.copy_measurements_to_host()
+        tracked_measurements = self._copy_tracked_measurements_to_host(
+            measurements,
+        )
         self._sync_swap_stats_from_gpu()
         energy_drift_stats = self._sync_energy_drift_stats_from_gpu()
         label_pos_arr = (
@@ -491,6 +649,7 @@ class ParallelTemperingGPU:
         )
         return {
             **measurements,
+            **tracked_measurements,
             "derived_observable_measure_sweeps": (
                 self.derived_observable_measure_sweeps
             ),

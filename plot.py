@@ -19,7 +19,21 @@ from typing import Any
 import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.ticker import MaxNLocator
-from analysis.bkt import helicity_reference_label, helicity_reference_line
+from analysis.autocorrelation_plots import (
+    add_autocorrelation_aliases,
+    attach_autocorrelation_metadata,
+    infer_autocorrelation_keys,
+    infer_autocorrelation_sample_strides,
+    infer_tagged_autocorrelation_keys,
+    infer_tagged_autocorrelation_sample_strides,
+    summarize_autocorrelation,
+)
+from analysis.bkt import (
+    estimate_bkt_intersections_by_L,
+    estimate_weber_minnhagen_C,
+    helicity_reference_label,
+    helicity_reference_line,
+)
 from analysis.pipeline import analyze_run
 
 RUN_FILE_GLOB = "*_L*.npz"
@@ -138,14 +152,7 @@ def add_legacy_aliases(data: dict[str, Any]) -> dict[str, Any]:
         if new_key not in out and old_key in out:
             out[new_key] = out[old_key]
 
-    if "order_parameter" in out:
-        order = np.asarray(out["order_parameter"])
-        if order.ndim == 2 and order.shape[1] > 2:
-            if "z2_order_abs" not in out:
-                out["z2_order_abs"] = np.abs(order)
-            if "z2_order2" not in out:
-                out["z2_order2"] = order * order
-    return out
+    return add_autocorrelation_aliases(out)
 
 def infer_extra_observable_specs(data: dict[str, Any]) -> dict[str, dict[str, str]]:
     """
@@ -185,91 +192,13 @@ def infer_extra_observable_specs(data: dict[str, Any]) -> dict[str, dict[str, st
         specs[name] = {"block_key": key}
     return specs
 
-def infer_autocorrelation_keys(data: dict[str, Any]) -> list[str]:
-    """
-    Choose full-history arrays for autocorrelation analysis.
-
-    Autocorrelation only makes sense if full measurement histories were saved.
-    Block means alone are not enough.
-    """
-    candidates = [
-        "energies",
-        "energy",
-        "z2_order_abs",
-        "z2_order2",
-        "mags",
-        "magnetization",
-        "nbar",
-        "n_bars",
-        "helicities",
-        "total_amplitude",
-    ]
-    keys: list[str] = []
-    for key in candidates:
-        if key not in data:
-            continue
-        arr = np.asarray(data[key])
-        if arr.ndim == 2 and arr.shape[1] > 2:
-            keys.append(key)
-    return keys
-
-def _stride_from_measure_sweeps(values: Any, fallback: int = 1) -> int:
-    """
-    Infer a positive sweep stride from saved measurement-sweep indices.
-    """
-    arr = np.asarray(values)
-    if arr.ndim != 1 or arr.size < 2:
-        return max(1, int(fallback))
-    diffs = np.diff(arr.astype(np.int64))
-    diffs = diffs[diffs > 0]
-    if diffs.size == 0:
-        return max(1, int(fallback))
-    return max(1, int(round(float(np.median(diffs)))))
-
-def infer_autocorrelation_sample_strides(
-    data: dict[str, Any],
-    keys: list[str],
-    params: dict[str, Any],
-) -> dict[str, int]:
-    """
-    Infer how many sweeps separate saved samples for each history array.
-    """
-    n_measure_sweeps = params.get("n_measure_sweeps")
-    try:
-        n_measure_sweeps = int(n_measure_sweeps)
-    except (TypeError, ValueError):
-        n_measure_sweeps = None
-
-    configured_derived_stride = int(params.get("derived_observable_stride", 1))
-    derived_sweeps = data.get("derived_observable_measure_sweeps")
-    derived_count = None
-    derived_stride = configured_derived_stride
-    if derived_sweeps is not None:
-        derived_arr = np.asarray(derived_sweeps)
-        if derived_arr.ndim == 1:
-            derived_count = int(derived_arr.size)
-            derived_stride = _stride_from_measure_sweeps(
-                derived_arr,
-                fallback=configured_derived_stride,
-            )
-
-    strides: dict[str, int] = {}
-    for key in keys:
-        arr = np.asarray(data.get(key))
-        if arr.ndim != 2:
-            continue
-        n_samples = int(arr.shape[1])
-        if n_measure_sweeps is not None and n_samples == n_measure_sweeps:
-            strides[key] = 1
-        elif derived_count is not None and n_samples == derived_count:
-            strides[key] = derived_stride
-        else:
-            strides[key] = max(1, int(round(
-                float(n_measure_sweeps) / float(n_samples)
-            ))) if n_measure_sweeps and n_samples > 0 else 1
-    return strides
-
-def analyze_output_folder(output_dir: Path) -> dict[int, dict[str, Any]]:
+def analyze_output_folder(
+    output_dir: Path,
+    *,
+    weber_minnhagen_C: float | None = None,
+    bkt_n_bootstrap: int = 2000,
+    bkt_rng_seed: int = 12345,
+) -> dict[int, dict[str, Any]]:
     """
     Load and analyze every L run in an output folder.
     """
@@ -294,6 +223,12 @@ def analyze_output_folder(output_dir: Path) -> dict[int, dict[str, Any]]:
             autocorr_keys,
             params,
         )
+        tagged_autocorr_keys = infer_tagged_autocorrelation_keys(data)
+        tagged_autocorr_strides = infer_tagged_autocorrelation_sample_strides(
+            data,
+            tagged_autocorr_keys,
+            params,
+        )
         obs = analyze_run(
             data,
             L=L,
@@ -303,18 +238,127 @@ def analyze_output_folder(output_dir: Path) -> dict[int, dict[str, Any]]:
             record_stride=record_stride,
             autocorrelation_keys=autocorr_keys,
             autocorrelation_sample_strides=autocorr_strides,
+            tagged_autocorrelation_keys=tagged_autocorr_keys,
+            tagged_autocorrelation_sample_strides=tagged_autocorr_strides,
             extra_observable_specs=extra_specs,
+            weber_minnhagen_C=weber_minnhagen_C,
+            bkt_n_bootstrap=bkt_n_bootstrap,
+            bkt_rng_seed=bkt_rng_seed + int(L),
         )
         obs["_source_file"] = str(path)
         obs["_params"] = params
         obs["_extra_observable_names"] = sorted(extra_specs.keys())
-        obs["_autocorrelation_keys"] = autocorr_keys
-        obs["_autocorrelation_sample_strides"] = autocorr_strides
+        attach_autocorrelation_metadata(
+            obs,
+            data,
+            autocorrelation_keys=autocorr_keys,
+            autocorrelation_sample_strides=autocorr_strides,
+            tagged_autocorrelation_keys=tagged_autocorr_keys,
+            tagged_autocorrelation_sample_strides=tagged_autocorr_strides,
+        )
         if "label_positions" in data:
             obs["label_positions"] = data["label_positions"]
             obs["label_position_record_stride"] = np.int32(record_stride)
         analyzed_by_L[L] = obs
     return dict(sorted(analyzed_by_L.items()))
+
+
+def _finite_float_or_none(value: Any) -> float | None:
+    """
+    Convert a candidate numeric value to float, returning None for non-finite.
+    """
+    try:
+        out = float(value)
+    except (TypeError, ValueError):
+        return None
+    return out if np.isfinite(out) else None
+
+
+def auto_select_weber_minnhagen_C(
+    analyzed_by_L: dict[int, dict[str, Any]],
+    *,
+    provided_C: float | None = None,
+    fit_enabled: bool = True,
+    scan_lo: float | None = None,
+    scan_hi: float | None = None,
+    scan_points: int = 5000,
+    min_sizes: int = 3,
+    require_all_sizes: bool = True,
+) -> tuple[float | None, dict[str, Any]]:
+    """
+    Choose the Weber-Minnhagen constant used for BKT plotting/crossings.
+
+    Priority:
+        1. explicit --weber-minnhagen-C, if supplied;
+        2. automatic multi-L fit, if possible;
+        3. None, which means the bare 2T/pi line.
+    """
+    explicit_C = _finite_float_or_none(provided_C)
+    if explicit_C is not None:
+        return explicit_C, {
+            "available": True,
+            "source": "user supplied",
+            "C": explicit_C,
+            "C_err": np.nan,
+        }
+
+    if not fit_enabled:
+        return None, {
+            "available": False,
+            "source": "disabled",
+            "reason": "automatic Weber-Minnhagen C fit disabled",
+        }
+
+    fit = estimate_weber_minnhagen_C(
+        analyzed_by_L,
+        min_sizes=min_sizes,
+        scan_lo=scan_lo,
+        scan_hi=scan_hi,
+        scan_points=scan_points,
+        require_all_sizes=require_all_sizes,
+    )
+    fit = dict(fit)
+    fit["source"] = "automatic fit"
+
+    if fit.get("available", False):
+        C = _finite_float_or_none(fit.get("C"))
+        if C is not None:
+            return C, fit
+
+    return None, fit
+
+
+def update_helicity_intersections_with_C(
+    analyzed_by_L: dict[int, dict[str, Any]],
+    *,
+    weber_minnhagen_C: float | None,
+    bkt_n_bootstrap: int = 2000,
+    bkt_rng_seed: int = 12345,
+) -> None:
+    """
+    Recompute per-L helicity/reference intersections after choosing C.
+    """
+    estimates = estimate_bkt_intersections_by_L(
+        analyzed_by_L,
+        weber_minnhagen_C=weber_minnhagen_C,
+        n_bootstrap=bkt_n_bootstrap,
+        rng_seed=bkt_rng_seed,
+    )
+    for L, estimate in estimates.items():
+        if int(L) in analyzed_by_L:
+            analyzed_by_L[int(L)]["bkt_intersection"] = estimate
+
+
+def attach_weber_minnhagen_fit(
+    analyzed_by_L: dict[int, dict[str, Any]],
+    fit: dict[str, Any],
+) -> None:
+    """
+    Store the global Weber-Minnhagen fit result on each analyzed run.
+    """
+    for obs in analyzed_by_L.values():
+        obs["weber_minnhagen_fit"] = fit
+
 
 # ============================================================
 # Plot helpers
@@ -847,31 +891,21 @@ def plot_index_curve(
 STANDARD_TEMPERATURE_PLOTS = [
     ("e", "e_err", r"Energy per site $e$", "Energy per site", "energy_per_site"),
     ("C", "C_err", r"Specific heat $C$", "Specific heat", "specific_heat"),
-    ("m_abs", "m_abs_err", r"Z$_2$ order parameter $\langle |m| \rangle$", "Z2 order parameter", "z2_order_parameter"),
+    (
+        "m_abs",
+        "m_abs_err",
+        r"Z$_2$ order parameter $\langle |m| \rangle$",
+        "Z2 order parameter",
+        "z2_order_parameter",
+    ),
     ("chi", "chi_err", r"Susceptibility $\chi$", "Susceptibility", "susceptibility"),
     ("U4", "U4_err", r"Binder cumulant $U_4$", "Binder cumulant", "binder_cumulant"),
-    ("Y", "Y_err", r"Helicity modulus $Y$", "Helicity modulus", "helicity_modulus"),
-    ("helicity_Yx", "helicity_Yx_err", r"$Y_x$", "Helicity component Yx", "helicity_Yx"),
-    ("helicity_Yy", "helicity_Yy_err", r"$Y_y$", "Helicity component Yy", "helicity_Yy"),
-    ("helicity_Kx", "helicity_Kx_err", r"$K_x$", "Helicity Kx", "helicity_Kx"),
-    ("helicity_Ky", "helicity_Ky_err", r"$K_y$", "Helicity Ky", "helicity_Ky"),
-    ("helicity_Ix", "helicity_Ix_err", r"$I_x$", "Helicity Ix", "helicity_Ix"),
-    ("helicity_Iy", "helicity_Iy_err", r"$I_y$", "Helicity Iy", "helicity_Iy"),
-    ("helicity_Ix2", "helicity_Ix2_err", r"$I_x^2$", "Helicity Ix2", "helicity_Ix2"),
-    ("helicity_Iy2", "helicity_Iy2_err", r"$I_y^2$", "Helicity Iy2", "helicity_Iy2"),
     (
-        "helicity_Ix_mean_over_rms",
-        None,
-        r"$|\langle I_x\rangle| / \sqrt{\langle I_x^2\rangle}$",
-        "Ix mean over RMS",
-        "helicity_Ix_mean_over_rms",
-    ),
-    (
-        "helicity_Iy_mean_over_rms",
-        None,
-        r"$|\langle I_y\rangle| / \sqrt{\langle I_y^2\rangle}$",
-        "Iy mean over RMS",
-        "helicity_Iy_mean_over_rms",
+        "binder_ratio",
+        "binder_ratio_err",
+        r"Binder ratio $\langle m^4\rangle / 3\langle m^2\rangle^2$",
+        "Binder ratio",
+        "binder_ratio",
     ),
 ]
 
@@ -901,9 +935,20 @@ def plot_standard_temperature_observables(
 def plot_helicity_bkt_reference(
     analyzed_by_L: dict[int, dict[str, Any]],
     plots_dir: Path,
+    *,
+    weber_minnhagen_C: float | None = None,
 ) -> list[Path]:
     """
-    Plot helicity modulus with the BKT reference line.
+    Plot helicity modulus with the bare BKT reference line.
+
+    If a Weber-Minnhagen C is available, scale each measured finite-L
+    helicity curve by the corresponding finite-size factor instead of scaling
+    the reference line:
+
+        Y_scaled = Y_L / [1 + 1 / (2 log L + C)].
+
+    Crossings are reported in the terminal summary; no vertical crossing
+    lines are drawn here.
     """
     available = [
         L for L, obs in analyzed_by_L.items()
@@ -911,60 +956,166 @@ def plot_helicity_bkt_reference(
     ]
     if not available:
         return []
+
     colors = _multi_L_colors(available)
     fig, ax = plt.subplots(figsize=FIGSIZE)
-    line_label_used = False
+    reference_L = max(int(L) for L in available)
+    use_wm_scaling = (
+        weber_minnhagen_C is not None and np.isfinite(weber_minnhagen_C)
+    )
+
     for L in available:
         obs = analyzed_by_L[L]
         temps = np.asarray(obs["temps"], dtype=np.float64)
         Y = np.asarray(obs["Y"], dtype=np.float64)
         Y_err = np.asarray(obs.get("Y_err", np.full_like(Y, np.nan)))
-        bkt = obs.get("bkt_intersection", {})
-        wm_C = bkt.get("weber_minnhagen_C")
-        if wm_C is not None and not np.isfinite(wm_C):
-            wm_C = None
-        reference = helicity_reference_line(
-            temps,
-            L=L,
-            weber_minnhagen_C=wm_C,
-        )
-        _multi_L_errorbar(
-            ax,
-            temps,
-            Y,
-            yerr=(
-                Y_err
-                if Y_err.shape == Y.shape and np.any(np.isfinite(Y_err))
-                else None
-            ),
-            L=L,
-            color=colors.get(int(L)),
-        )
-        ax.plot(
-            temps,
-            reference,
-            "--",
-            color="0.35",
-            alpha=0.7,
-            label=helicity_reference_label(wm_C) if not line_label_used else None,
-        )
-        line_label_used = True
-        if bkt.get("available", False):
-            ax.axvline(
-                float(bkt["T"]),
-                color="0.35",
-                linestyle=":",
-                linewidth=1,
-                alpha=0.6,
+        color = colors.get(int(L))
+        if use_wm_scaling:
+            denominator = 2.0 * np.log(float(L)) + float(weber_minnhagen_C)
+            if np.isfinite(denominator) and denominator > 0.0:
+                scale = 1.0 + 1.0 / denominator
+                Y = Y / scale
+                Y_err = Y_err / scale
+
+        if Y_err.shape == Y.shape and np.any(np.isfinite(Y_err)):
+            _multi_L_errorbar(
+                ax,
+                temps,
+                Y,
+                yerr=Y_err,
+                L=L,
+                color=color,
             )
+        else:
+            _multi_L_plot(
+                ax,
+                temps,
+                Y,
+                L=L,
+                color=color,
+            )
+
+        if int(L) == reference_L:
+            reference = helicity_reference_line(
+                temps,
+            )
+            ax.plot(
+                temps,
+                reference,
+                "--",
+                color="0.25",
+                linewidth=1.25,
+                alpha=0.85,
+                label=fr"{helicity_reference_label(None)}",
+            )
+
+    ylabel = r"Helicity modulus $Y$"
+    title = "Helicity modulus with BKT reference"
+    if use_wm_scaling:
+        ylabel = r"Scaled helicity $Y/[1+1/(2\log L+C)]$"
+        title = "Weber-Minnhagen scaled helicity with bare BKT reference"
+
     _format_axes(
         ax,
         xlabel=r"Temperature $T$",
-        ylabel=r"Helicity modulus $Y$",
-        title="Helicity modulus and BKT reference",
+        ylabel=ylabel,
+        title=title,
     )
     _legend(ax)
-    out_path = plots_dir / "helicity_bkt_reference.png"
+
+    out_path = plots_dir / "helicity_modulus.png"
+    finish_figure(fig, out_path)
+    return [out_path]
+
+
+def plot_helicity_diagnostics(
+    analyzed_by_L: dict[int, dict[str, Any]],
+    plots_dir: Path,
+) -> list[Path]:
+    """
+    Plot helicity component diagnostics in one multi-panel figure.
+
+    This replaces separate plots for Kx, Ky, Ix, Iy, Ix2, and Iy2.
+    """
+    panels = [
+        ("helicity_Kx", "helicity_Kx_err", r"$K_x$"),
+        ("helicity_Ky", "helicity_Ky_err", r"$K_y$"),
+        ("helicity_Ix", "helicity_Ix_err", r"$I_x$"),
+        ("helicity_Iy", "helicity_Iy_err", r"$I_y$"),
+        ("helicity_Ix2", "helicity_Ix2_err", r"$I_x^2$"),
+        ("helicity_Iy2", "helicity_Iy2_err", r"$I_y^2$"),
+    ]
+
+    available_L = sorted(
+        {
+            int(L)
+            for L, obs in analyzed_by_L.items()
+            if "temps" in obs
+            and any(has_temperature_curve(obs, key) for key, _, _ in panels)
+        }
+    )
+    if not available_L:
+        return []
+
+    colors = _multi_L_colors(available_L)
+    fig, axes = plt.subplots(2, 3, figsize=(11.5, 6.6), sharex=True)
+    flat_axes = axes.ravel()
+
+    for ax, (key, err_key, ylabel) in zip(flat_axes, panels):
+        for L in available_L:
+            obs = analyzed_by_L[L]
+            if not has_temperature_curve(obs, key):
+                continue
+
+            temps = np.asarray(obs["temps"], dtype=np.float64)
+            values = np.asarray(obs[key], dtype=np.float64)
+            color = colors.get(int(L))
+
+            errors = None
+            if err_key in obs:
+                maybe_errors = np.asarray(obs[err_key], dtype=np.float64)
+                if maybe_errors.shape == values.shape and np.any(np.isfinite(maybe_errors)):
+                    errors = maybe_errors
+
+            if errors is None:
+                _multi_L_plot(
+                    ax,
+                    temps,
+                    values,
+                    L=L,
+                    color=color,
+                    label=fr"$L={L}$",
+                )
+            else:
+                _multi_L_errorbar(
+                    ax,
+                    temps,
+                    values,
+                    yerr=errors,
+                    L=L,
+                    color=color,
+                    label=fr"$L={L}$",
+                )
+
+        _format_axes(
+            ax,
+            xlabel=r"Temperature $T$",
+            ylabel=ylabel,
+            title=ylabel,
+        )
+
+    handles, labels = flat_axes[0].get_legend_handles_labels()
+    if handles:
+        fig.legend(
+            handles,
+            labels,
+            loc="upper center",
+            ncol=min(len(labels), 4),
+            frameon=False,
+        )
+
+    fig.suptitle("Helicity diagnostics", y=0.995)
+    out_path = plots_dir / "helicity_diagnostics.png"
     finish_figure(fig, out_path)
     return [out_path]
 
@@ -995,301 +1146,12 @@ def plot_extra_observables(
     return written
 
 # ============================================================
-# Diagnostic plots
-# ============================================================
-
-def plot_swap_rate(
-    analyzed_by_L: dict[int, dict[str, Any]],
-    plots_dir: Path,
-) -> list[Path]:
-    """
-    Plot PT swap acceptance rate versus temperature-edge midpoint.
-    """
-    available = [
-        L for L, obs in analyzed_by_L.items()
-        if "swap_rate" in obs and "temps" in obs
-    ]
-    if not available:
-        return []
-    colors = _multi_L_colors(available)
-    fig, ax = plt.subplots(figsize=FIGSIZE)
-    for L in available:
-        obs = analyzed_by_L[L]
-        temps = np.asarray(obs["temps"], dtype=np.float64)
-        rate = np.asarray(obs["swap_rate"], dtype=np.float64)
-        if rate.ndim != 1 or rate.size == 0:
-            continue
-        if temps.ndim == 1 and temps.size == rate.size + 1:
-            x = 0.5 * (temps[:-1] + temps[1:])
-            xlabel = r"Temperature edge midpoint"
-        else:
-            x = np.arange(rate.size)
-            xlabel = "Swap edge index"
-
-        _multi_L_plot(
-            ax,
-            x,
-            rate,
-            L=L,
-            color=colors.get(int(L)),
-        )
-    _format_axes(
-        ax,
-        xlabel=xlabel,
-        ylabel="Swap acceptance rate",
-        title="Parallel-tempering swap acceptance",
-    )
-    _legend(ax)
-    out_path = plots_dir / "swap_acceptance_rate.png"
-    finish_figure(fig, out_path)
-    return [out_path]
-
-def plot_local_acceptance(
-    analyzed_by_L: dict[int, dict[str, Any]],
-    plots_dir: Path,
-) -> list[Path]:
-    """
-    Plot local acceptance rates if available.
-
-    These are plotted versus index because the axis meaning is model-dependent.
-    """
-    written: list[Path] = []
-    for key in sorted(
-        {
-            key
-            for obs in analyzed_by_L.values()
-            for key in obs
-            if key.endswith("_acceptance_rate") and key != "swap_rate"
-        }
-    ):
-        out_path = plots_dir / f"{safe_filename_token(key)}.png"
-        ok = plot_index_curve(
-            analyzed_by_L,
-            key=key,
-            ylabel=key.replace("_", " "),
-            title=key.replace("_", " ").title(),
-            out_path=out_path,
-        )
-        if ok:
-            written.append(out_path)
-    return written
-
-def plot_walker_positions(
-    analyzed_by_L: dict[int, dict[str, Any]],
-    plots_dir: Path,
-) -> list[Path]:
-    """
-    Plot representative PT walker trajectories through the temperature ladder.
-    """
-    available = [
-        L for L, obs in analyzed_by_L.items()
-        if "label_positions" in obs
-        and np.asarray(obs["label_positions"]).ndim == 2
-        and np.asarray(obs["label_positions"]).size > 0
-    ]
-    if not available:
-        return []
-
-    L = max(int(value) for value in available)
-    obs = analyzed_by_L[L]
-    positions = np.asarray(obs["label_positions"], dtype=np.int64)
-    n_records, n_walkers = positions.shape
-    record_stride = int(obs.get("label_position_record_stride", 1))
-    x = (np.arange(n_records, dtype=np.float64) + 1.0) * record_stride
-    n_traces = max(1, int(np.ceil(0.25 * n_walkers)))
-    walker_indices = np.arange(0, n_walkers, 4, dtype=np.int64)
-    if walker_indices.size > n_traces:
-        walker_indices = walker_indices[:n_traces]
-
-    fig, ax = plt.subplots(figsize=(7.2, 4.9))
-    cmap = plt.get_cmap("rainbow")
-    color_positions = np.linspace(0.02, 0.98, max(len(walker_indices), 2))
-    for i, walker in enumerate(walker_indices):
-        ax.plot(
-            x,
-            positions[:, walker],
-            color=cmap(color_positions[i]),
-            linewidth=0.75,
-            alpha=0.72,
-        )
-    ax.axhline(0, color="0.25", linestyle=":", linewidth=0.9, alpha=0.7)
-    ax.axhline(
-        n_walkers - 1,
-        color="0.25",
-        linestyle=":",
-        linewidth=0.9,
-        alpha=0.7,
-    )
-    ax.set_ylim(-0.5, max(n_walkers - 0.5, 0.5))
-    _format_axes(
-        ax,
-        xlabel="Swap attempt index",
-        ylabel="Temperature slot",
-        title=fr"$L={L}$ walker slot trajectories",
-        integer_x=True,
-    )
-    out_path = plots_dir / "walker_positions.png"
-    finish_figure(fig, out_path)
-    return [out_path]
-
-def plot_round_trip_duration_histogram(
-    analyzed_by_L: dict[int, dict[str, Any]],
-    plots_dir: Path,
-) -> list[Path]:
-    """
-    Plot histogram of round-trip durations.
-    """
-    available = [
-        L for L, obs in analyzed_by_L.items()
-        if "round_trip_durations" in obs
-        and np.asarray(obs["round_trip_durations"]).size > 0
-    ]
-    if not available:
-        return []
-    colors = _multi_L_colors(available)
-    fig, ax = plt.subplots(figsize=FIGSIZE)
-    for L in available:
-        durations = np.asarray(
-            analyzed_by_L[L]["round_trip_durations"],
-            dtype=np.float64,
-        )
-        durations = durations[np.isfinite(durations)]
-        if durations.size == 0:
-            continue
-        ax.hist(
-            durations,
-            bins="auto",
-            histtype="step",
-            color=colors.get(int(L)),
-            linewidth=MULTI_L_LINEWIDTH,
-            alpha=0.95,
-            label=fr"$L={L}$",
-        )
-    _format_axes(
-        ax,
-        xlabel="Round-trip duration",
-        ylabel="Count",
-        title="PT round-trip duration histogram",
-    )
-    _legend(ax)
-    out_path = plots_dir / "round_trip_durations.png"
-    finish_figure(fig, out_path)
-    return [out_path]
-
-def plot_autocorrelation_times(
-    analyzed_by_L: dict[int, dict[str, Any]],
-    plots_dir: Path,
-) -> list[Path]:
-    """
-    Plot sweep-scaled tau_int curves produced by diagnostics.
-    """
-    tau_keys = sorted(
-        {
-            key
-            for obs in analyzed_by_L.values()
-            for key in obs
-            if key.endswith("_tau_int_sweeps")
-        }
-    )
-    ylabel = r"Integrated autocorrelation time $\tau_{\mathrm{int}}$ (sweeps)"
-    if not tau_keys:
-        tau_keys = sorted(
-            {
-                key
-                for obs in analyzed_by_L.values()
-                for key in obs
-                if key.endswith("_tau_int")
-            }
-        )
-        ylabel = (
-            r"Integrated autocorrelation time "
-            r"$\tau_{\mathrm{int}}$ (saved samples)"
-        )
-    written: list[Path] = []
-    for key in tau_keys:
-        out_path = plots_dir / f"{safe_filename_token(key)}.png"
-        ok = plot_temperature_curve(
-            analyzed_by_L,
-            key=key,
-            err_key=None,
-            ylabel=ylabel,
-            title=autocorrelation_title(key),
-            out_path=out_path,
-        )
-        if ok:
-            written.append(out_path)
-    return written
-
-def autocorrelation_title(key: str) -> str:
-    """
-    Human-readable title for autocorrelation diagnostics.
-    """
-    name = key
-    for suffix in ["_tau_int_sweeps", "_tau_int"]:
-        if name.endswith(suffix):
-            name = name[: -len(suffix)]
-            break
-    labels = {
-        "energies": "Energy",
-        "energy": "Energy",
-        "z2_order_abs": r"Z2 $|M|$",
-        "z2_order2": r"Z2 $M^2$",
-        "mags": "Order parameter",
-        "magnetization": "Magnetization",
-        "nbar": "nbar",
-        "n_bars": "nbar",
-        "helicities": "Helicity",
-        "total_amplitude": "Total amplitude",
-    }
-    label = labels.get(name, name.replace("_", " ").title())
-    return f"{label} autocorrelation time"
-
-def plot_energy_drift(
-    analyzed_by_L: dict[int, dict[str, Any]],
-    plots_dir: Path,
-) -> list[Path]:
-    """
-    Plot energy drift diagnostics if available.
-    """
-    written: list[Path] = []
-    for key in [
-        "energy_drift_abs_max_by_walker",
-        "energy_drift_recompute_count",
-    ]:
-        out_path = plots_dir / f"{safe_filename_token(key)}.png"
-        ok = plot_index_curve(
-            analyzed_by_L,
-            key=key,
-            ylabel=key.replace("_", " "),
-            title=key.replace("_", " ").title(),
-            out_path=out_path,
-        )
-        if ok:
-            written.append(out_path)
-    return written
-
-def plot_diagnostics(
-    analyzed_by_L: dict[int, dict[str, Any]],
-    plots_dir: Path,
-) -> list[Path]:
-    """
-    Plot all available simulation diagnostics.
-    """
-    written: list[Path] = []
-    written.extend(plot_swap_rate(analyzed_by_L, plots_dir))
-    written.extend(plot_local_acceptance(analyzed_by_L, plots_dir))
-    written.extend(plot_walker_positions(analyzed_by_L, plots_dir))
-    written.extend(plot_autocorrelation_times(analyzed_by_L, plots_dir))
-    written.extend(plot_energy_drift(analyzed_by_L, plots_dir))
-    return written
-
-# ============================================================
 # Summary
 # ============================================================
 
 def _json_clean(value: Any) -> Any:
     """
-    Convert NumPy values and non-finite floats to JSON-friendly objects.
+    Convert NumPy values and non finite floats to JSON friendly objects.
     """
     if isinstance(value, dict):
         return {str(key): _json_clean(item) for key, item in value.items()}
@@ -1346,6 +1208,12 @@ def build_analysis_report(
     Build the printed/JSON summary of critical and diagnostic estimates.
     """
     binder_crossing = estimate_largest_L_binder_crossing(analyzed_by_L)
+    weber_minnhagen_fit: dict[str, Any] = {}
+    for obs in analyzed_by_L.values():
+        candidate = obs.get("weber_minnhagen_fit")
+        if isinstance(candidate, dict):
+            weber_minnhagen_fit = candidate
+            break
     runs: dict[str, Any] = {}
     for L, obs in analyzed_by_L.items():
         run: dict[str, Any] = {}
@@ -1421,21 +1289,13 @@ def build_analysis_report(
         if energy_drift:
             run["energy_drift"] = energy_drift
 
-        tau_summary: dict[str, Any] = {}
-        for key in sorted(obs):
-            if key.endswith("_tau_int_sweeps"):
-                tau_summary[key] = _finite_stats(obs[key])
-        if tau_summary:
-            run["autocorrelation"] = tau_summary
-            run["autocorrelation_sample_strides"] = obs.get(
-                "_autocorrelation_sample_strides",
-                {},
-            )
+        run.update(summarize_autocorrelation(obs))
 
         runs[str(int(L))] = run
 
     return {
         "binder_crossing": binder_crossing,
+        "weber_minnhagen_fit": weber_minnhagen_fit,
         "runs": runs,
     }
 
@@ -1480,6 +1340,41 @@ def print_analysis_report(
     elif isinstance(binder, dict):
         print(f"Binder crossing: unavailable ({binder.get('reason', 'no reason')})")
 
+    wm_fit = report.get("weber_minnhagen_fit", {})
+    if isinstance(wm_fit, dict) and wm_fit.get("available", False):
+        source = wm_fit.get("source", "automatic fit")
+        print(
+            "Weber-Minnhagen C "
+            f"({source}): "
+            f"C={_fmt_float(wm_fit.get('C'))} "
+            f"+/- {_fmt_float(wm_fit.get('C_err'), digits=2)}, "
+            f"T_fit={_fmt_float(wm_fit.get('T'))}, "
+            f"chi2/dof={_fmt_float(wm_fit.get('red_chi2'), digits=3)}"
+        )
+    elif isinstance(wm_fit, dict) and wm_fit:
+        print(
+            "Weber-Minnhagen C: unavailable "
+            f"({wm_fit.get('reason', 'no reason')}); using bare BKT line"
+        )
+
+    printed_helicity = False
+    for L in L_values:
+        run = report.get("runs", {}).get(str(L), {})
+        bkt = run.get("bkt_intersection")
+        if not isinstance(bkt, dict) or not bkt.get("available", False):
+            continue
+        printed_helicity = True
+        wm_C = bkt.get("weber_minnhagen_C")
+        uses_wm = wm_C is not None and np.isfinite(float(wm_C))
+        line_name = "Weber-Minnhagen" if uses_wm else "bare BKT"
+        print(
+            f"Helicity crossing L={L} ({line_name}): "
+            f"T={_fmt_float(bkt.get('T'))} "
+            f"+/- {_fmt_float(bkt.get('T_err'), digits=2)}"
+        )
+    if not printed_helicity:
+        print("Helicity crossing: unavailable")
+
     for L in L_values:
         run = report.get("runs", {}).get(str(L), {})
         parts = []
@@ -1496,13 +1391,6 @@ def print_analysis_report(
                 "chi peak "
                 f"T={_fmt_float(chi_peak.get('T'))}, "
                 f"chi={_fmt_float(chi_peak.get('value'))}"
-            )
-        bkt = run.get("bkt_intersection")
-        if isinstance(bkt, dict) and bkt.get("available", False):
-            parts.append(
-                "BKT "
-                f"T={_fmt_float(bkt.get('T'))} "
-                f"+/- {_fmt_float(bkt.get('T_err'), digits=2)}"
             )
         swap = run.get("swap_acceptance")
         if isinstance(swap, dict):
@@ -1547,6 +1435,14 @@ def write_plot_summary(
                     "_autocorrelation_sample_strides",
                     {},
                 ),
+                "tagged_autocorrelation_keys": obs.get(
+                    "_tagged_autocorrelation_keys",
+                    [],
+                ),
+                "tagged_autocorrelation_sample_strides": obs.get(
+                    "_tagged_autocorrelation_sample_strides",
+                    {},
+                ),
                 "bkt_intersection": obs.get("bkt_intersection"),
             }
             for L, obs in analyzed_by_L.items()
@@ -1582,6 +1478,68 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--weber-minnhagen-C",
+        type=float,
+        default=None,
+        help=(
+            "Override the automatic Weber-Minnhagen C fit and use this "
+            "fixed C in (2T/pi)[1 + 1/(2 log L + C)]."
+        ),
+    )
+    parser.add_argument(
+        "--no-fit-weber-minnhagen-C",
+        action="store_true",
+        help=(
+            "Disable automatic Weber-Minnhagen C fitting. If no explicit "
+            "--weber-minnhagen-C is supplied, use the bare 2T/pi line."
+        ),
+    )
+    parser.add_argument(
+        "--wm-scan-lo",
+        type=float,
+        default=None,
+        help="Optional lower temperature limit for automatic C fitting.",
+    )
+    parser.add_argument(
+        "--wm-scan-hi",
+        type=float,
+        default=None,
+        help="Optional upper temperature limit for automatic C fitting.",
+    )
+    parser.add_argument(
+        "--wm-scan-points",
+        type=int,
+        default=5000,
+        help="Number of candidate temperatures sampled for automatic C fitting.",
+    )
+    parser.add_argument(
+        "--wm-min-sizes",
+        type=int,
+        default=3,
+        help="Minimum number of system sizes required for automatic C fitting.",
+    )
+    parser.add_argument(
+        "--wm-allow-missing-sizes",
+        action="store_true",
+        help=(
+            "Allow a candidate fit temperature to use a subset of available "
+            "sizes, as long as --wm-min-sizes is satisfied. By default all "
+            "sizes must be usable at the chosen temperature."
+        ),
+    )
+    parser.add_argument(
+        "--bkt-bootstrap",
+        type=int,
+        default=2000,
+        help="Number of bootstrap samples for helicity/BKT crossing errors.",
+    )
+    parser.add_argument(
+        "--bkt-rng-seed",
+        type=int,
+        default=12345,
+        help="Random seed for helicity/BKT crossing bootstrap errors.",
+    )
+    parser.add_argument(
         "--show",
         action="store_true",
         help="Show plots interactively after saving.",
@@ -1600,7 +1558,31 @@ def main() -> None:
     else:
         plots_dir = Path(args.plots_dir)
     plots_dir.mkdir(parents=True, exist_ok=True)
-    analyzed_by_L = analyze_output_folder(output_dir)
+    analyzed_by_L = analyze_output_folder(
+        output_dir,
+        weber_minnhagen_C=None,
+        bkt_n_bootstrap=args.bkt_bootstrap,
+        bkt_rng_seed=args.bkt_rng_seed,
+    )
+
+    effective_wm_C, wm_fit = auto_select_weber_minnhagen_C(
+        analyzed_by_L,
+        provided_C=args.weber_minnhagen_C,
+        fit_enabled=not bool(args.no_fit_weber_minnhagen_C),
+        scan_lo=args.wm_scan_lo,
+        scan_hi=args.wm_scan_hi,
+        scan_points=args.wm_scan_points,
+        min_sizes=args.wm_min_sizes,
+        require_all_sizes=not bool(args.wm_allow_missing_sizes),
+    )
+    attach_weber_minnhagen_fit(analyzed_by_L, wm_fit)
+    update_helicity_intersections_with_C(
+        analyzed_by_L,
+        weber_minnhagen_C=effective_wm_C,
+        bkt_n_bootstrap=args.bkt_bootstrap,
+        bkt_rng_seed=args.bkt_rng_seed,
+    )
+
     analysis_report = build_analysis_report(analyzed_by_L)
     written: list[Path] = []
     written.extend(
@@ -1613,16 +1595,17 @@ def main() -> None:
         plot_helicity_bkt_reference(
             analyzed_by_L,
             plots_dir,
+            weber_minnhagen_C=effective_wm_C,
         )
     )
     written.extend(
-        plot_extra_observables(
+        plot_helicity_diagnostics(
             analyzed_by_L,
             plots_dir,
         )
     )
     written.extend(
-        plot_diagnostics(
+        plot_extra_observables(
             analyzed_by_L,
             plots_dir,
         )

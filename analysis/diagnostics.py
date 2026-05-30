@@ -287,12 +287,35 @@ def compute_autocorrelation_by_temperature(
         "sample_stride_sweeps": np.full(n_temps, sample_stride, dtype=np.int64),
     }
 
+def compute_autocorrelation_by_series(
+    values: ArrayLike,
+    *,
+    max_lag: int | None = None,
+    window_c: float = 5.0,
+    sample_stride: int = 1,
+) -> dict[str, np.ndarray]:
+    """
+    Compute autocorrelation summaries for generic row-wise histories.
+
+    The input shape is (n_series, n_measurements). This is used for tagged
+    walkers, where the row index is a walker ID selection rather than a
+    temperature slot.
+    """
+    return compute_autocorrelation_by_temperature(
+        values,
+        max_lag=max_lag,
+        window_c=window_c,
+        sample_stride=sample_stride,
+    )
+
 def compute_run_diagnostics(
     data: dict[str, Any],
     *,
     record_stride: int = 1,
     autocorrelation_keys: list[str] | None = None,
     autocorrelation_sample_strides: dict[str, int] | None = None,
+    tagged_autocorrelation_keys: list[str] | None = None,
+    tagged_autocorrelation_sample_strides: dict[str, int] | None = None,
     max_lag: int | None = None,
     window_c: float = 5.0,
 ) -> dict[str, Any]:
@@ -313,6 +336,18 @@ def compute_run_diagnostics(
                 local_update_acceptance=data["local_update_acceptance"],
                 local_update_attempts=data["local_update_attempts"],
                 name="local",
+            )
+        )
+    for update_name in ("phase_update", "amplitude_update", "chirality_update"):
+        acceptance_key = f"{update_name}_acceptance"
+        attempts_key = f"{update_name}_attempts"
+        if acceptance_key not in data or attempts_key not in data:
+            continue
+        diagnostics.update(
+            compute_local_acceptance_diagnostics(
+                local_update_acceptance=data[acceptance_key],
+                local_update_attempts=data[attempts_key],
+                name=update_name,
             )
         )
     if "label_positions" in data:
@@ -359,6 +394,25 @@ def compute_run_diagnostics(
             continue
         sample_stride = int(autocorrelation_sample_strides.get(key, 1))
         ac = compute_autocorrelation_by_temperature(
+            values,
+            max_lag=max_lag,
+            window_c=window_c,
+            sample_stride=sample_stride,
+        )
+        for ac_key, ac_value in ac.items():
+            diagnostics[f"{key}_{ac_key}"] = ac_value
+    if tagged_autocorrelation_keys is None:
+        tagged_autocorrelation_keys = []
+    if tagged_autocorrelation_sample_strides is None:
+        tagged_autocorrelation_sample_strides = {}
+    for key in tagged_autocorrelation_keys:
+        if key not in data:
+            continue
+        values = np.asarray(data[key])
+        if values.ndim != 2:
+            continue
+        sample_stride = int(tagged_autocorrelation_sample_strides.get(key, 1))
+        ac = compute_autocorrelation_by_series(
             values,
             max_lag=max_lag,
             window_c=window_c,

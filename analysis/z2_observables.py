@@ -68,6 +68,7 @@ def compute_z2_observables(
         m_abs, m_abs_err
         chi, chi_err
         U4, U4_err
+        binder_ratio, binder_ratio_err
     """
     temps = np.asarray(temps, dtype=np.float64)
     if temps.ndim != 1:
@@ -101,6 +102,8 @@ def compute_z2_observables(
     chi_err = np.full(n_temps, np.nan)
     U4 = np.full(n_temps, np.nan)
     U4_err = np.full(n_temps, np.nan)
+    binder_ratio = np.full(n_temps, np.nan)
+    binder_ratio_err = np.full(n_temps, np.nan)
     order_scale = 1.0 if order_parameter_per_site else 1.0 / N
     for r in range(n_temps):
         beta = float(betas[r])
@@ -141,6 +144,19 @@ def compute_z2_observables(
             },
             estimate_binder,
         )
+        def estimate_binder_ratio(means: dict[str, np.ndarray]) -> float:
+            M2_mean = float(means["M2"][0])
+            M4_mean = float(means["M4"][0])
+            if M2_mean <= 0.0:
+                return np.nan
+            return M4_mean / (3.0 * M2_mean * M2_mean)
+        binder_ratio[r], binder_ratio_err[r] = jackknife_apply(
+            {
+                "M2": M2_blocks[r],
+                "M4": M4_blocks[r],
+            },
+            estimate_binder_ratio,
+        )
     return {
         "m_abs": m_abs,
         "m_abs_err": m_abs_err,
@@ -148,4 +164,6 @@ def compute_z2_observables(
         "chi_err": chi_err,
         "U4": U4,
         "U4_err": U4_err,
+        "binder_ratio": binder_ratio,
+        "binder_ratio_err": binder_ratio_err,
     }

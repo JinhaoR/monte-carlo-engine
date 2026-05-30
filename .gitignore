@@ -1,1 +1,5 @@
 outputs/
+profiling/results/
+*.nsys-rep
+*.sqlite
+*.ncu-rep

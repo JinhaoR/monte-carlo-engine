@@ -41,6 +41,7 @@ def run_pt_experiment(
     energy_drift_tolerance_per_site: float | None = 1.0e-5,
     store_primary_histories: bool = True,
     observable_n_blocks: int = 20,
+    tracked_walkers: Iterable[int] | int | None = None,
     output_dir: str | Path | None = None,
     output_prefix: str | None = None,
 ) -> dict[str, Any]:
@@ -57,6 +58,12 @@ def run_pt_experiment(
         if L <= 0:
             raise ValueError(f"L={L} is not positive.")
         model.validate_lattice(L)
+    if tracked_walkers is None:
+        tracked_walkers_config: list[int] = []
+    elif isinstance(tracked_walkers, (int, np.integer)):
+        tracked_walkers_config = [int(tracked_walkers)]
+    else:
+        tracked_walkers_config = [int(walker) for walker in tracked_walkers]
     temps = make_temperature_ladder(
         T_min=T_min,
         T_max=T_max,
@@ -108,6 +115,7 @@ def run_pt_experiment(
         ),
         "store_primary_histories": bool(store_primary_histories),
         "observable_n_blocks": int(observable_n_blocks),
+        "tracked_walkers": tracked_walkers_config,
     }
     output_state = None
     if output_dir is not None:
@@ -151,6 +159,7 @@ def run_pt_experiment(
             derived_observable_stride=derived_observable_stride,
             store_primary_histories=store_primary_histories,
             observable_n_blocks=observable_n_blocks,
+            tracked_walkers=tracked_walkers_config,
         )
         L_completed_at = local_timestamp()
         run_times[str(int(L))] = {

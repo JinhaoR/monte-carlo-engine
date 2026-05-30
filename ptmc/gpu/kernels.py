@@ -63,3 +63,41 @@ def record_positions_kernel(
     walker = cuda.grid(1)
     if walker < slot_of_walker.shape[0]:
         out[row, walker] = slot_of_walker[walker]
+
+
+@cuda.jit
+def record_selected_positions_kernel(
+    slot_of_walker,
+    tracked_walkers,
+    out,
+    col,
+):
+    """
+    Record current temperature slots for selected tagged walkers.
+
+    out[tracked_index, col] = current slot of tracked_walkers[tracked_index]
+    """
+    tracked_index = cuda.grid(1)
+    if tracked_index < tracked_walkers.shape[0]:
+        walker = tracked_walkers[tracked_index]
+        if 0 <= walker < slot_of_walker.shape[0]:
+            out[tracked_index, col] = slot_of_walker[walker]
+
+
+@cuda.jit
+def record_selected_scalar_by_walker_kernel(
+    value_by_walker,
+    tracked_walkers,
+    out,
+    col,
+):
+    """
+    Record one walker-indexed scalar for selected tagged walkers.
+
+    out[tracked_index, col] = value_by_walker[tracked_walkers[tracked_index]]
+    """
+    tracked_index = cuda.grid(1)
+    if tracked_index < tracked_walkers.shape[0]:
+        walker = tracked_walkers[tracked_index]
+        if 0 <= walker < value_by_walker.shape[0]:
+            out[tracked_index, col] = value_by_walker[walker]
